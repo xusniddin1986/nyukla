@@ -14,7 +14,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 CHANNEL_USERNAME = "@aclubnc"
 CAPTION_TEXT = (
-    "📥 @NyuklaBot orqali yuklab olindi"
+    "📥 @NYuklaBot orqali yuklab olindi"
 )
 
 # ---------------- ADMIN ID VA STATISTIKA -----------------
@@ -96,7 +96,7 @@ def help_command(message):
         "/about - Bot haqida ma'lumot\n"
         "/admin - Admin paneli (faqat admin)\n\n"
         "Instagramdan video linkini yuborib videoni yuklab olishingiz mumkin 🚀\n"
-        "Bog‘lanish: @xamidovcore"
+        "Bog‘lanish: @thexamidovs"
     )
     bot.send_message(message.chat.id, help_text)
 
@@ -104,8 +104,8 @@ def help_command(message):
 @bot.message_handler(commands=["about"])
 def about_command(message):
     about_text = (
-        "🤖 Nyukla Bot\n\n"
-        "🔥 Assalomu alaykum! @NyuklaBot ga xush kelibsiz.\n\n"
+        "🤖 NYuklaBot\n\n"
+        "🔥 Assalomu alaykum! @NYuklaBot ga xush kelibsiz.\n\n"
         "Bot orqali siz quyidagilarni yuklab olishingiz mumkin:\n"
         "• Instagram postlar\n"
         "• Reels videolar\n"
