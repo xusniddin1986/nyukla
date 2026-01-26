@@ -5,312 +5,229 @@ import os
 import time
 import sqlite3
 from flask import Flask, request
-import threading
 
 # ==========================================
 #              SOZLAMALAR
 # ==========================================
-BOT_TOKEN = '8510711803:AAE3klDsgCCgQTaB0oY8IDL4u-GmK9D2yAc'  
-ADMIN_ID = 8553997595                  # O'zingizning ID raqamingiz (raqamda)
-CHANNEL_ID = '@aclubnc'    # Kanal useri
+BOT_TOKEN = '8510711803:AAE3klDsgCCgQTaB0oY8IDL4u-GmK9D2yAc' 
+ADMIN_ID = 8553997595 
+CHANNEL_ID = '@aclubnc' 
 CHANNEL_URL = 'https://t.me/aclubnc' 
-WEBHOOK_URL = 'https://nyukla.onrender.com' # Render havolasi
+WEBHOOK_URL = 'https://nyukla.onrender.com'
 
-# ==========================================
-#              INITIALIZATION
-# ==========================================
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 app = Flask(__name__)
 
-# Papka yaratish
+# Fayllar uchun papka
 if not os.path.exists('downloads'):
     os.makedirs('downloads')
 
 # ==========================================
-#           BAZA BILAN ISHLASH
+#           BAZA FUNKSIYALARI
 # ==========================================
 def init_db():
-    with sqlite3.connect('users.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)')
-        conn.commit()
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, join_date TEXT)')
+    conn.commit()
+    conn.close()
 
 def add_user(user_id):
-    try:
-        with sqlite3.connect('users.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
-            conn.commit()
-    except:
-        pass
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    date = time.strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute('INSERT OR IGNORE INTO users (user_id, join_date) VALUES (?, ?)', (user_id, date))
+    conn.commit()
+    conn.close()
 
-def get_users_count():
-    with sqlite3.connect('users.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM users')
-        return cursor.fetchone()[0]
-
-def get_all_users():
-    with sqlite3.connect('users.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id FROM users')
-        return [row[0] for row in cursor.fetchall()]
+def get_stats():
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM users')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
 # ==========================================
-#         MAJBURIY OBUNA TIZIMI
+#         MAJBURIY OBUNA TEKSHIRUVCHI
 # ==========================================
-def check_sub(user_id):
+def is_subscribed(user_id):
     try:
-        member = bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ['creator', 'administrator', 'member']
+        status = bot.get_chat_member(CHANNEL_ID, user_id).status
+        if status in ['creator', 'administrator', 'member']:
+            return True
+        return False
     except:
-        return False # Bot admin emas yoki xatolik
+        return False
 
-def sub_markup():
+def sub_keyboard():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("➕ Kanalga a'zo bo'lish", url=CHANNEL_URL))
-    markup.add(types.InlineKeyboardButton("✅ Tasdiqlash", callback_data="check_subscription"))
+    markup.add(types.InlineKeyboardButton("➕ Kanalga obuna bo'lish", url=CHANNEL_URL))
+    markup.add(types.InlineKeyboardButton("✅ Tekshirish", callback_data="recheck"))
     return markup
 
 # ==========================================
-#      YUKLASH VA QIDIRUV (ENGINE)
+#         YUKLASH VA QIDIRUV ENGINE
 # ==========================================
-def search_music(query):
-    # Youtube'dan 10 ta musiqa qidiradi
+def get_video_info(url):
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
         'quiet': True,
-        'default_search': 'ytsearch10',
-        'extract_flat': True, # Faqat ma'lumot oladi, yuklamaydi
+        'no_warnings': True,
+        'format': 'best',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        return info.get('entries', [])
+        return ydl.extract_info(url, download=False)
 
-def download_audio(video_id):
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    # Renderda FFmpeg muammosi bo'lmasligi uchun m4a format
+def download_media(url, mode='video'):
+    ext = 'mp4' if mode == 'video' else 'm4a'
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio',
-        'outtmpl': 'downloads/%(title)s.%(ext)s',
-        'quiet': True,
-        'max_filesize': 50 * 1024 * 1024
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info), info.get('title', 'Music')
-
-def download_video_func(url):
-    ydl_opts = {
-        'format': 'best[ext=mp4]', # Eng yaxshi mp4
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' if mode == 'video' else 'bestaudio[ext=m4a]/best',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'quiet': True,
-        'max_filesize': 50 * 1024 * 1024
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info), info.get('title', 'Video')
+        return ydl.prepare_filename(info), info.get('title', 'Media')
 
 # ==========================================
-#               BOT HANDLERS
+#               ADMIN PANEL
 # ==========================================
-
-# 1. /start komandasi
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    add_user(message.chat.id)
-    if check_sub(message.chat.id):
-        bot.send_message(message.chat.id, 
-                         "👋 <b>Assalomu alaykum!</b>\n\n"
-                         "📥 Men Instagram, TikTok, YouTube, Pinterest dan video yuklayman.\n"
-                         "🔎 Yoki musiqa nomini yozing, men topib beraman.", 
-                         parse_mode='HTML')
-    else:
-        bot.send_message(message.chat.id, "⚠️ <b>Botdan foydalanish uchun kanalga a'zo bo'ling!</b>", 
-                         parse_mode='HTML', reply_markup=sub_markup())
-
-# 2. Obunani tekshirish tugmasi
-@bot.callback_query_handler(func=lambda call: call.data == "check_subscription")
-def check_sub_callback(call):
-    if check_sub(call.message.chat.id):
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id, "✅ Obuna tasdiqlandi!")
-        bot.send_message(call.message.chat.id, "Marhamat, link yuboring yoki musiqa nomini yozing.")
-    else:
-        bot.answer_callback_query(call.id, "❌ Siz hali a'zo bo'lmadingiz!", show_alert=True)
-
-# 3. /help va /about
-@bot.message_handler(commands=['help'])
-def help_cmd(message):
-    bot.send_message(message.chat.id, "Video link yuboring (Insta/TikTok/YouTube) yoki musiqa nomini yozing.")
-
-@bot.message_handler(commands=['about'])
-def about_cmd(message):
-    bot.send_message(message.chat.id, "Versiya: 2.0. \nDasturchi: @Useringiz")
-
-# 4. ADMIN PANEL (/admin)
 @bot.message_handler(commands=['admin'])
-def admin_menu(message):
-    if message.chat.id == ADMIN_ID:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add("📊 Statistika", "📤 Xabar yuborish")
-        markup.add("🔙 Chiqish")
-        bot.send_message(message.chat.id, "👑 Admin panelga xush kelibsiz", reply_markup=markup)
+def admin_panel(message):
+    if message.from_user.id == ADMIN_ID:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("📊 Statistika", "✉️ Xabar yuborish")
+        markup.add("👤 Foydalanuvchi ID", "🔙 Chiqish")
+        bot.send_message(message.chat.id, "<b>👑 Admin Panel</b>", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text == "📊 Statistika" and m.chat.id == ADMIN_ID)
-def stats(message):
-    cnt = get_users_count()
-    bot.send_message(message.chat.id, f"👥 Jami foydalanuvchilar: {cnt} ta")
+@bot.message_handler(func=lambda m: m.text == "📊 Statistika" and m.from_user.id == ADMIN_ID)
+def admin_stats(message):
+    count = get_stats()
+    bot.send_message(message.chat.id, f"📊 Bot a'zolari: <b>{count} ta</b>")
 
-@bot.message_handler(func=lambda m: m.text == "📤 Xabar yuborish" and m.chat.id == ADMIN_ID)
-def broadcast_start(message):
-    msg = bot.send_message(message.chat.id, "Xabarni yuboring (Rasm, matn, video...):")
-    bot.register_next_step_handler(msg, broadcast_process)
+@bot.message_handler(func=lambda m: m.text == "👤 Foydalanuvchi ID" and m.from_user.id == ADMIN_ID)
+def admin_id(message):
+    bot.send_message(message.chat.id, f"Sizning ID: <code>{message.from_user.id}</code>")
 
-def broadcast_process(message):
-    if message.text == "🔙 Chiqish":
-        bot.send_message(message.chat.id, "Bekor qilindi.")
-        return
+@bot.message_handler(func=lambda m: m.text == "✉️ Xabar yuborish" and m.from_user.id == ADMIN_ID)
+def admin_broadcast(message):
+    msg = bot.send_message(message.chat.id, "Yubormoqchi bo'lgan xabaringizni yozing (yoki rasm yuboring):")
+    bot.register_next_step_handler(msg, send_broadcast)
+
+def send_broadcast(message):
+    conn = sqlite3.connect('users.db')
+    users = conn.cursor().execute('SELECT user_id FROM users').fetchall()
+    conn.close()
     
-    users = get_all_users()
-    bot.send_message(message.chat.id, f"⏳ Xabar {len(users)} kishiga yuborilmoqda...")
-    count = 0
-    for uid in users:
+    success = 0
+    for u in users:
         try:
-            bot.copy_message(uid, message.chat.id, message.message_id)
-            count += 1
+            bot.copy_message(u[0], message.chat.id, message.message_id)
+            success += 1
             time.sleep(0.05)
-        except: pass
-    bot.send_message(message.chat.id, f"✅ Xabar {count} kishiga yetib bordi.")
-
-@bot.message_handler(func=lambda m: m.text == "🔙 Chiqish" and m.chat.id == ADMIN_ID)
-def back_admin(message):
-    bot.send_message(message.chat.id, "Admin panel yopildi.", reply_markup=types.ReplyKeyboardRemove())
-
-# 5. MUSIQA QIDIRISH (TEXT orqali)
-@bot.message_handler(func=lambda m: not m.text.startswith('/') and not m.text.startswith('http'))
-def text_search(message):
-    if not check_sub(message.chat.id):
-        bot.send_message(message.chat.id, "⚠️ Avval kanalga a'zo bo'ling!", reply_markup=sub_markup())
-        return
-
-    msg = bot.send_message(message.chat.id, "🔎 <b>Musiqa qidirilmoqda...</b>", parse_mode='HTML')
-    try:
-        results = search_music(message.text)
-        if not results:
-            bot.edit_message_text("❌ Hech narsa topilmadi.", message.chat.id, msg.message_id)
-            return
-
-        # Ro'yxat matni va tugmalar
-        text_response = f"🎵 <b>'{message.text}' bo'yicha natijalar:</b>\n\n"
-        markup = types.InlineKeyboardMarkup(row_width=2) # 2 qator qilib chiroyli chiqarish
-        
-        for i, item in enumerate(results):
-            title = item.get('title', 'Noma\'lum')
-            # Matnga qo'shish
-            text_response += f"{i+1}. {title}\n"
-            # Tugma qo'shish (callbackda ID ketadi)
-            vid_id = item['id']
-            markup.add(types.InlineKeyboardButton(f"{i+1}. 📥 Yuklash", callback_data=f"dl:{vid_id}"))
-
-        bot.edit_message_text(text_response, message.chat.id, msg.message_id, reply_markup=markup, parse_mode='HTML')
-        
-    except Exception as e:
-        bot.edit_message_text(f"Xatolik: {e}", message.chat.id, msg.message_id)
-
-# 6. VIDEO YUKLASH HANDLER
-@bot.message_handler(func=lambda m: m.text and (m.text.startswith('http') or 'instagram' in m.text or 'tiktok' in m.text))
-def video_dl(message):
-    if not check_sub(message.chat.id):
-        bot.send_message(message.chat.id, "⚠️ Avval kanalga a'zo bo'ling!", reply_markup=sub_markup())
-        return
-
-    url = message.text
-    msg = bot.send_message(message.chat.id, "📥 <b>Video yuklanmoqda...</b>", parse_mode='HTML')
-
-    try:
-        path, title = download_video_func(url)
-        
-        # Video tagiga musiqa qidirish tugmasi
-        markup = types.InlineKeyboardMarkup()
-        # Qidiruv so'zi sifatida video nomini olamiz (faqat birinchi 30 harfi)
-        search_query = title[:30] 
-        markup.add(types.InlineKeyboardButton("🎹 Musiqasini topish", callback_data=f"find_music:{search_query}"))
-
-        with open(path, 'rb') as video:
-            bot.send_video(message.chat.id, video, caption=f"🎬 {title}", reply_markup=markup)
-        
-        bot.delete_message(message.chat.id, msg.message_id)
-        os.remove(path)
-    except Exception as e:
-        bot.edit_message_text(f"❌ Yuklab bo'lmadi yoki havola xato.\nSabab: {e}", message.chat.id, msg.message_id)
-
-# 7. CALLBACKS (Musiqa yuklash va Video ichidan qidirish)
-
-# Video tagidagi "Musiqasini topish" tugmasi bosilganda
-@bot.callback_query_handler(func=lambda call: call.data.startswith('find_music:'))
-def find_music_callback(call):
-    if not check_sub(call.message.chat.id):
-        bot.answer_callback_query(call.id, "Kanalga a'zo bo'ling!", show_alert=True)
-        return
-
-    query = call.data.split(':', 1)[1] # "find_music:Title" dan Title ni ajratib olish
-    bot.answer_callback_query(call.id, "🔍 Qidirilmoqda...")
-    
-    # Text search funksiyasini chaqiramiz, faqat message obyektini sun'iy yasaymiz
-    # Yoki kodni qaytaramiz:
-    try:
-        results = search_music(query)
-        text_response = f"🎹 <b>Videodan olingan nom bo'yicha ({query}):</b>\n\n"
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        
-        for i, item in enumerate(results):
-            title = item.get('title', 'Noma\'lum')
-            text_response += f"{i+1}. {title}\n"
-            markup.add(types.InlineKeyboardButton(f"{i+1}. {title}", callback_data=f"dl:{item['id']}"))
-            
-        bot.send_message(call.message.chat.id, text_response, reply_markup=markup, parse_mode='HTML')
-    except:
-        bot.send_message(call.message.chat.id, "Musiqa topilmadi.")
-
-# Musiqa yuklash tugmasi bosilganda (1-10 ro'yxatdan)
-@bot.callback_query_handler(func=lambda call: call.data.startswith('dl:'))
-def download_music_callback(call):
-    if not check_sub(call.message.chat.id):
-        bot.answer_callback_query(call.id, "Kanalga a'zo bo'ling!", show_alert=True)
-        return
-
-    vid_id = call.data.split(':')[1]
-    bot.answer_callback_query(call.id, "Yuklanmoqda... ⏳")
-    bot.send_message(call.message.chat.id, "🎧 Musiqa fayli tayyorlanmoqda...")
-
-    try:
-        path, title = download_audio(vid_id)
-        with open(path, 'rb') as audio:
-            bot.send_audio(call.message.chat.id, audio, caption=f"🎵 {title}\n🤖 @{bot.get_me().username}")
-        os.remove(path)
-    except Exception as e:
-        bot.send_message(call.message.chat.id, "Musiqa yuklashda xatolik.")
+        except: continue
+    bot.send_message(message.chat.id, f"✅ Xabar {success} kishiga yuborildi.")
 
 # ==========================================
-#              WEBHOOK SERVER
+#             ASOSIY LOGIKA
+# ==========================================
+@bot.message_handler(commands=['start', 'help', 'about'])
+def commands(message):
+    add_user(message.from_user.id)
+    if message.text == '/start':
+        if not is_subscribed(message.from_user.id):
+            return bot.send_message(message.chat.id, "<b>Bot ishlashi uchun kanalga obuna bo'ling!</b>", reply_markup=sub_keyboard())
+        bot.send_message(message.chat.id, "👋 <b>Xush kelibsiz!</b>\n\nLink yuboring yoki musiqa nomini yozing.")
+    elif message.text == '/help':
+        bot.send_message(message.chat.id, "Instagram, YouTube, TikTok va Pinterestdan video yuklash uchun link yuboring.")
+    elif message.text == '/about':
+        bot.send_message(message.chat.id, "Ushbu bot ijtimoiy tarmoqlardan video yuklash uchun yaratildi.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "recheck")
+def recheck(call):
+    if is_subscribed(call.from_user.id):
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, "✅ Rahmat! Endi botdan foydalanishingiz mumkin.")
+    else:
+        bot.answer_callback_query(call.id, "❌ Hali obuna bo'lmagansiz!", show_alert=True)
+
+# 1-10 RO'YXAT VA MUSIQA QIDIRISH
+@bot.message_handler(func=lambda m: not m.text.startswith('http') and not m.text.startswith('/'))
+def search_music_list(message):
+    if not is_subscribed(message.from_user.id):
+        return bot.send_message(message.chat.id, "Obuna bo'ling!", reply_markup=sub_keyboard())
+    
+    m = bot.send_message(message.chat.id, "🔎 Qidirilmoqda...")
+    try:
+        ydl_opts = {'default_search': 'ytsearch10', 'quiet': True, 'extract_flat': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            results = ydl.extract_info(message.text, download=False).get('entries', [])
+        
+        if not results:
+            return bot.edit_message_text("❌ Musiqa topilmadi.", message.chat.id, m.message_id)
+        
+        res_text = f"🎵 <b>'{message.text}' bo'yicha topilganlar:</b>\n\n"
+        markup = types.InlineKeyboardMarkup()
+        for i, item in enumerate(results):
+            res_text += f"{i+1}. {item['title'][:50]}...\n"
+            markup.add(types.InlineKeyboardButton(f"{i+1}", callback_data=f"ms:{item['id']}"))
+        
+        bot.edit_message_text(res_text, message.chat.id, m.message_id, reply_markup=markup)
+    except:
+        bot.edit_message_text("❌ Qidiruvda xatolik.", message.chat.id, m.message_id)
+
+# VIDEO YUKLASH
+@bot.message_handler(func=lambda m: m.text.startswith('http'))
+def handle_video(message):
+    if not is_subscribed(message.from_user.id):
+        return bot.send_message(message.chat.id, "Obuna bo'ling!", reply_markup=sub_keyboard())
+    
+    m = bot.send_message(message.chat.id, "⏳ Video tahlil qilinmoqda...")
+    try:
+        path, title = download_media(message.text, mode='video')
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🎵 Musiqasini yuklash", callback_data=f"get_m:{title[:20]}"))
+        
+        with open(path, 'rb') as v:
+            bot.send_video(message.chat.id, v, caption=f"🎬 <b>{title}</b>", reply_markup=markup)
+        
+        os.remove(path)
+        bot.delete_message(message.chat.id, m.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Xato: Videoni yuklab bo'lmadi. {str(e)[:50]}", message.chat.id, m.message_id)
+
+# CALLBACKLAR
+@bot.callback_query_handler(func=lambda call: True)
+def calls(call):
+    if call.data.startswith('ms:'): # Ro'yxatdan musiqa tanlanganda
+        vid_id = call.data.split(':')[1]
+        bot.answer_callback_query(call.id, "Yuklanmoqda...")
+        try:
+            path, title = download_media(f"https://www.youtube.com/watch?v={vid_id}", mode='audio')
+            with open(path, 'rb') as a:
+                bot.send_audio(call.message.chat.id, a, caption=f"🎵 {title}")
+            os.remove(path)
+        except: bot.send_message(call.message.chat.id, "Musiqani yuklashda xato.")
+    
+    elif call.data.startswith('get_m:'): # Video tagidagi tugma bosilganda
+        title = call.data.split(':')[1]
+        call.message.text = title
+        search_music_list(call.message)
+
+# ==========================================
+#              WEBHOOK & SERVER
 # ==========================================
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
+    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
     return "!", 200
 
 @app.route("/")
 def webhook():
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL + '/' + BOT_TOKEN)
-    return "Webhook ishladi!", 200
+    return "Bot status: Running", 200
 
 if __name__ == "__main__":
     init_db()
-    # Render PORT ni oladi
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080)))
