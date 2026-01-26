@@ -1,233 +1,306 @@
-import telebot
-from telebot import types
-import yt_dlp
+from aiogram import types
+import asyncio
+import logging
 import os
-import time
 import sqlite3
-from flask import Flask, request
+import tempfile
+import time
+from typing import Dict, List
 
-# ==========================================
-#              SOZLAMALAR
-# ==========================================
-BOT_TOKEN = '8510711803:AAE3klDsgCCgQTaB0oY8IDL4u-GmK9D2yAc' 
-ADMIN_ID = 8553997595 
-CHANNEL_ID = '@aclubnc' 
-CHANNEL_URL = 'https://t.me/aclubnc' 
-WEBHOOK_URL = 'https://nyukla.onrender.com'
+import yt_dlp
+from aiohttp import web
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup
+)
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
-app = Flask(__name__)
+# =========================
+# CONFIG
+# =========================
+BOT_TOKEN = "8510711803:AAE3klDsgCCgQTaB0oY8IDL4u-GmK9D2yAc"
+CHANNEL = "@aclubnc"
+ADMINS = {8553997595}
+DB_NAME = "bot.db"
+COOKIES_FILE = "cookies.txt"
+PORT = 10000
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = "https://nyukla.onrender.com/webhook"
 
-# Fayllar uchun papka
-if not os.path.exists('downloads'):
-    os.makedirs('downloads')
 
-# ==========================================
-#           BAZA FUNKSIYALARI
-# ==========================================
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, join_date TEXT)')
-    conn.commit()
-    conn.close()
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("nyukla")
 
-def add_user(user_id):
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    date = time.strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('INSERT OR IGNORE INTO users (user_id, join_date) VALUES (?, ?)', (user_id, date))
-    conn.commit()
-    conn.close()
+# =========================
+# DATABASE
+# =========================
+db = sqlite3.connect(DB_NAME, check_same_thread=False)
+cur = db.cursor()
 
-def get_stats():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM users')
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    joined_at INTEGER
+)
+""")
 
-# ==========================================
-#         MAJBURIY OBUNA TEKSHIRUVCHI
-# ==========================================
-def is_subscribed(user_id):
+cur.execute("""
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
+db.commit()
+
+def db_get(key: str, default="0"):
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
+
+def db_set(key: str, value: str):
+    cur.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
+    db.commit()
+
+# default settings
+if db_get("force_sub") is None:
+    db_set("force_sub", "1")
+
+# =========================
+# BOT
+# =========================
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+
+# =========================
+# USER SESSIONS
+# =========================
+class UserSession:
+    def __init__(self):
+        self.tracks: List[dict] = []
+        self.last_activity = time.time()
+
+sessions: Dict[int, UserSession] = {}
+
+def get_session(uid: int) -> UserSession:
+    if uid not in sessions:
+        sessions[uid] = UserSession()
+    sessions[uid].last_activity = time.time()
+    return sessions[uid]
+
+async def cleanup_sessions():
+    while True:
+        now = time.time()
+        for uid in list(sessions.keys()):
+            if now - sessions[uid].last_activity > 600:
+                del sessions[uid]
+        await asyncio.sleep(60)
+
+# =========================
+# UTILS
+# =========================
+async def check_subscription(uid: int) -> bool:
+    if db_get("force_sub", "1") == "0":
+        return True
     try:
-        status = bot.get_chat_member(CHANNEL_ID, user_id).status
-        if status in ['creator', 'administrator', 'member']:
-            return True
-        return False
+        m = await bot.get_chat_member(CHANNEL, uid)
+        return m.status in ("member", "administrator", "creator")
     except:
         return False
 
+def save_user(user):
+    cur.execute(
+        "INSERT OR IGNORE INTO users VALUES (?,?,?)",
+        (user.id, user.username, int(time.time()))
+    )
+    db.commit()
+
+YDL_BASE = {
+    "quiet": True,
+    "cookiefile": COOKIES_FILE,
+    "nocheckcertificate": True,
+}
+
+def yt_search(query: str) -> List[dict]:
+    opts = YDL_BASE | {"extract_flat": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
+        return res.get("entries", [])
+
+def yt_download_audio(url: str, out_path: str):
+    opts = YDL_BASE | {
+        "format": "bestaudio",
+        "outtmpl": out_path,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+        }]
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+# =========================
+# KEYBOARDS
+# =========================
 def sub_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("➕ Kanalga obuna bo'lish", url=CHANNEL_URL))
-    markup.add(types.InlineKeyboardButton("✅ Tekshirish", callback_data="recheck"))
-    return markup
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Kanalga obuna", url=f"https://t.me/{CHANNEL[1:]}")],
+        [InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")]
+    ])
 
-# ==========================================
-#         YUKLASH VA QIDIRUV ENGINE
-# ==========================================
-def get_video_info(url):
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'best',
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+def admin_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            ["📊 Statistika", "📢 Broadcast"],
+            ["🔒 Obuna ON/OFF"]
+        ],
+        resize_keyboard=True
+    )
 
-def download_media(url, mode='video'):
-    ext = 'mp4' if mode == 'video' else 'm4a'
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' if mode == 'video' else 'bestaudio[ext=m4a]/best',
-        'outtmpl': 'downloads/%(id)s.%(ext)s',
-        'quiet': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info), info.get('title', 'Media')
+# =========================
+# COMMANDS
+# =========================
+@dp.message(Command("start"))
+async def cmd_start(msg: Message):
+    save_user(msg.from_user)
 
-# ==========================================
-#               ADMIN PANEL
-# ==========================================
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.from_user.id == ADMIN_ID:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("📊 Statistika", "✉️ Xabar yuborish")
-        markup.add("👤 Foydalanuvchi ID", "🔙 Chiqish")
-        bot.send_message(message.chat.id, "<b>👑 Admin Panel</b>", reply_markup=markup)
+    if not await check_subscription(msg.from_user.id):
+        await msg.answer(
+            "❗ Botdan foydalanish uchun kanalga obuna bo‘ling.",
+            reply_markup=sub_keyboard()
+        )
+        return
 
-@bot.message_handler(func=lambda m: m.text == "📊 Statistika" and m.from_user.id == ADMIN_ID)
-def admin_stats(message):
-    count = get_stats()
-    bot.send_message(message.chat.id, f"📊 Bot a'zolari: <b>{count} ta</b>")
+    await msg.answer(
+        "🎵 Musiqa nomi yoki 🎥 video link yuboring.\n"
+        "YouTube / Instagram / TikTok / Facebook qo‘llab-quvvatlanadi."
+    )
 
-@bot.message_handler(func=lambda m: m.text == "👤 Foydalanuvchi ID" and m.from_user.id == ADMIN_ID)
-def admin_id(message):
-    bot.send_message(message.chat.id, f"Sizning ID: <code>{message.from_user.id}</code>")
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
+    await msg.answer(
+        "/start - botni ishga tushirish\n"
+        "/help - yordam\n"
+        "/about - bot haqida\n"
+        "/admin - admin panel"
+    )
 
-@bot.message_handler(func=lambda m: m.text == "✉️ Xabar yuborish" and m.from_user.id == ADMIN_ID)
-def admin_broadcast(message):
-    msg = bot.send_message(message.chat.id, "Yubormoqchi bo'lgan xabaringizni yozing (yoki rasm yuboring):")
-    bot.register_next_step_handler(msg, send_broadcast)
+@dp.message(Command("about"))
+async def cmd_about(msg: Message):
+    await msg.answer("Nyukla Media Bot • Professional downloader")
 
-def send_broadcast(message):
-    conn = sqlite3.connect('users.db')
-    users = conn.cursor().execute('SELECT user_id FROM users').fetchall()
-    conn.close()
-    
-    success = 0
-    for u in users:
-        try:
-            bot.copy_message(u[0], message.chat.id, message.message_id)
-            success += 1
-            time.sleep(0.05)
-        except: continue
-    bot.send_message(message.chat.id, f"✅ Xabar {success} kishiga yuborildi.")
+@dp.message(Command("admin"))
+async def cmd_admin(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return
+    await msg.answer("👑 Admin panel", reply_markup=admin_keyboard())
 
-# ==========================================
-#             ASOSIY LOGIKA
-# ==========================================
-@bot.message_handler(commands=['start', 'help', 'about'])
-def commands(message):
-    add_user(message.from_user.id)
-    if message.text == '/start':
-        if not is_subscribed(message.from_user.id):
-            return bot.send_message(message.chat.id, "<b>Bot ishlashi uchun kanalga obuna bo'ling!</b>", reply_markup=sub_keyboard())
-        bot.send_message(message.chat.id, "👋 <b>Xush kelibsiz!</b>\n\nLink yuboring yoki musiqa nomini yozing.")
-    elif message.text == '/help':
-        bot.send_message(message.chat.id, "Instagram, YouTube, TikTok va Pinterestdan video yuklash uchun link yuboring.")
-    elif message.text == '/about':
-        bot.send_message(message.chat.id, "Ushbu bot ijtimoiy tarmoqlardan video yuklash uchun yaratildi.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "recheck")
-def recheck(call):
-    if is_subscribed(call.from_user.id):
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.send_message(call.message.chat.id, "✅ Rahmat! Endi botdan foydalanishingiz mumkin.")
+# =========================
+# CALLBACKS
+# =========================
+@dp.callback_query(F.data == "check_sub")
+async def cb_check_sub(cb: CallbackQuery):
+    if await check_subscription(cb.from_user.id):
+        await cb.message.edit_text("✅ Obuna tasdiqlandi. /start")
     else:
-        bot.answer_callback_query(call.id, "❌ Hali obuna bo'lmagansiz!", show_alert=True)
+        await cb.answer("❌ Hali obuna bo‘lmadingiz", show_alert=True)
 
-# 1-10 RO'YXAT VA MUSIQA QIDIRISH
-@bot.message_handler(func=lambda m: not m.text.startswith('http') and not m.text.startswith('/'))
-def search_music_list(message):
-    if not is_subscribed(message.from_user.id):
-        return bot.send_message(message.chat.id, "Obuna bo'ling!", reply_markup=sub_keyboard())
-    
-    m = bot.send_message(message.chat.id, "🔎 Qidirilmoqda...")
-    try:
-        ydl_opts = {'default_search': 'ytsearch10', 'quiet': True, 'extract_flat': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            results = ydl.extract_info(message.text, download=False).get('entries', [])
-        
-        if not results:
-            return bot.edit_message_text("❌ Musiqa topilmadi.", message.chat.id, m.message_id)
-        
-        res_text = f"🎵 <b>'{message.text}' bo'yicha topilganlar:</b>\n\n"
-        markup = types.InlineKeyboardMarkup()
-        for i, item in enumerate(results):
-            res_text += f"{i+1}. {item['title'][:50]}...\n"
-            markup.add(types.InlineKeyboardButton(f"{i+1}", callback_data=f"ms:{item['id']}"))
-        
-        bot.edit_message_text(res_text, message.chat.id, m.message_id, reply_markup=markup)
-    except:
-        bot.edit_message_text("❌ Qidiruvda xatolik.", message.chat.id, m.message_id)
+@dp.callback_query(F.data.startswith("play_"))
+async def cb_play(cb: CallbackQuery):
+    uid = cb.from_user.id
+    session = sessions.get(uid)
+    if not session:
+        await cb.answer("Sessiya topilmadi", show_alert=True)
+        return
 
-# VIDEO YUKLASH
-@bot.message_handler(func=lambda m: m.text.startswith('http'))
-def handle_video(message):
-    if not is_subscribed(message.from_user.id):
-        return bot.send_message(message.chat.id, "Obuna bo'ling!", reply_markup=sub_keyboard())
-    
-    m = bot.send_message(message.chat.id, "⏳ Video tahlil qilinmoqda...")
-    try:
-        path, title = download_media(message.text, mode='video')
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🎵 Musiqasini yuklash", callback_data=f"get_m:{title[:20]}"))
-        
-        with open(path, 'rb') as v:
-            bot.send_video(message.chat.id, v, caption=f"🎬 <b>{title}</b>", reply_markup=markup)
-        
-        os.remove(path)
-        bot.delete_message(message.chat.id, m.message_id)
-    except Exception as e:
-        bot.edit_message_text(f"❌ Xato: Videoni yuklab bo'lmadi. {str(e)[:50]}", message.chat.id, m.message_id)
+    idx = int(cb.data.split("_")[1])
+    track = session.tracks[idx]
 
-# CALLBACKLAR
-@bot.callback_query_handler(func=lambda call: True)
-def calls(call):
-    if call.data.startswith('ms:'): # Ro'yxatdan musiqa tanlanganda
-        vid_id = call.data.split(':')[1]
-        bot.answer_callback_query(call.id, "Yuklanmoqda...")
-        try:
-            path, title = download_media(f"https://www.youtube.com/watch?v={vid_id}", mode='audio')
-            with open(path, 'rb') as a:
-                bot.send_audio(call.message.chat.id, a, caption=f"🎵 {title}")
-            os.remove(path)
-        except: bot.send_message(call.message.chat.id, "Musiqani yuklashda xato.")
-    
-    elif call.data.startswith('get_m:'): # Video tagidagi tugma bosilganda
-        title = call.data.split(':')[1]
-        call.message.text = title
-        search_music_list(call.message)
+    await cb.answer("⏳ Yuklanmoqda...")
 
-# ==========================================
-#              WEBHOOK & SERVER
-# ==========================================
-@app.route('/' + BOT_TOKEN, methods=['POST'])
-def getMessage():
-    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
-    return "!", 200
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "audio.%(ext)s")
+        yt_download_audio(track["url"], out)
+        mp3 = os.path.join(tmp, "audio.mp3")
+        await cb.message.answer_audio(open(mp3, "rb"))
 
-@app.route("/")
-def webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL + '/' + BOT_TOKEN)
-    return "Bot status: Running", 200
+# =========================
+# TEXT HANDLER
+# =========================
+@dp.message(F.text)
+async def handle_text(msg: Message):
+    if not await check_subscription(msg.from_user.id):
+        await cmd_start(msg)
+        return
 
-if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080)))
+    session = get_session(msg.from_user.id)
+    tracks = yt_search(msg.text)
+    if not tracks:
+        await msg.answer("❌ Hech narsa topilmadi")
+        return
+
+    session.tracks = tracks
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{i+1}. {t['title'][:40]}",
+            callback_data=f"play_{i}"
+        )]
+        for i, t in enumerate(tracks)
+    ])
+
+    await msg.answer("🎶 Top 10 natija:", reply_markup=kb)
+
+# =========================
+# ADMIN ACTIONS
+# =========================
+@dp.message(F.text == "📊 Statistika")
+async def admin_stats(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return
+    cur.execute("SELECT COUNT(*) FROM users")
+    count = cur.fetchone()[0]
+    await msg.answer(f"👥 Foydalanuvchilar: {count}")
+
+@dp.message(F.text == "🔒 Obuna ON/OFF")
+async def admin_toggle_sub(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return
+    current = db_get("force_sub", "1")
+    new = "0" if current == "1" else "1"
+    db_set("force_sub", new)
+    await msg.answer(f"Majburiy obuna: {'ON' if new=='1' else 'OFF'}")
+
+async def web_server():
+    app = web.Application()
+
+    async def handle_webhook(request):
+        data = await request.json()
+        update = types.Update(**data)
+        await dp.feed_update(bot, update)
+        return web.Response(text="ok")
+
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.router.add_get("/", lambda r: web.Response(text="OK"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    await bot.set_webhook(WEBHOOK_URL)
+
+async def main():
+    await web_server()
+    asyncio.create_task(cleanup_sessions())
+    await asyncio.Event().wait()  # botni tirik ushlab turadi
