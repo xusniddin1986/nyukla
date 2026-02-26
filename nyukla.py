@@ -11,12 +11,12 @@ from youtube_search import YoutubeSearch
 from database import Database
 
 # --- KONFIGURATSIYA ---
-API_TOKEN = '8679344041:AAGVo6gwxoyjWOPCSb3ezdtfgwJ7PkhhQaM'
+BOT_TOKEN = '8679344041:AAGVo6gwxoyjWOPCSb3ezdtfgwJ7PkhhQaM'
 ADMIN_ID = 8553997595 # O'zingizning ID
 CHANNELS = ["@aclubnc"] # Majburiy obuna
 
 db = Database('bot_database.db')
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 class AdminStates(StatesGroup):
