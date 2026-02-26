@@ -1,328 +1,173 @@
-import logging
 import os
-import sqlite3
+import logging
 import asyncio
-from aiogram import Bot, Dispatcher, types, executor
+from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import yt_dlp
-from aiohttp import web
+from youtube_search import YoutubeSearch
+from database import Database
 
-# --- SOZLAMALAR (O'ZGARTIRING) ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8510711803:AAE1sApRn8lL0MFjUhOd5uxYQwQZpDa14w8") # Renderda Environment Variable qilib kiritasiz
-CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002980992642") # Kanal IDsi
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/aclubnc") # Kanal linki
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8553997595")) # Admin IDsi
+# --- KONFIGURATSIYA ---
+API_TOKEN = 'TOKENINGIZNI_YOZING'
+ADMIN_ID = 123456789 # O'zingizning ID
+CHANNELS = ["@kanal_nomi"] # Majburiy obuna
 
-# --- LOGGING ---
-logging.basicConfig(level=logging.INFO)
+db = Database('bot_database.db')
+bot = Bot(token=API_TOKEN, parse_mode="HTML")
+dp = Dispatcher(bot, storage=MemoryStorage())
 
-# --- BOT & DB INIT ---
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+class AdminStates(StatesGroup):
+    waiting_for_ad = State()
 
-# --- DATABASE (SQLite) ---
-def db_start():
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
-    # Boshlang'ich sozlama: Majburiy obuna yoqilgan (1)
-    cur.execute("INSERT OR IGNORE INTO settings VALUES ('force_sub', '1')")
-    con.commit()
-    con.close()
-
-def add_user(user_id, username):
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (user_id, username))
-    con.commit()
-    con.close()
-
-def get_users_count():
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    count = cur.fetchone()[0]
-    con.close()
-    return count
-
-def get_all_users():
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("SELECT id FROM users")
-    users = cur.fetchall()
-    con.close()
-    return [x[0] for x in users]
-
-def set_force_sub(status): # 1 = On, 0 = Off
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("UPDATE settings SET value = ? WHERE key = 'force_sub'", (str(status),))
-    con.commit()
-    con.close()
-
-def get_force_sub_status():
-    con = sqlite3.connect("bot_db.db")
-    cur = con.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = 'force_sub'")
-    status = cur.fetchone()
-    con.close()
-    return status[0] if status else '1'
-
-# --- STATES ---
-class AdminState(StatesGroup):
-    broadcast = State()
-
-# --- YORDAMCHI FUNKSIYALAR ---
+# --- MAJBURIY OBUNA TEKSHIRUV ---
 async def check_sub(user_id):
-    force_sub = get_force_sub_status()
-    if force_sub == '0':
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ['creator', 'administrator', 'member']:
-            return True
-    except Exception as e:
-        logging.error(f"Kanal tekshirishda xato: {e}")
-        # Agar bot kanalga admin bo'lmasa yoki xato bo'lsa, foydalanuvchini o'tkazib yuboramiz (xalaqit bermaslik uchun)
-        return True 
-    return False
+    for channel in CHANNELS:
+        try:
+            chat_member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if chat_member.status == 'left': return False
+        except: return False
+    return True
 
-def get_yt_opts(is_audio=False):
-    if is_audio:
-        return {
-            'format': 'bestaudio/best',
-            'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'quiet': True,
-            'noplaylist': True
-        }
-    else:
-        return {
-            'format': 'best[ext=mp4][filesize<50M]', # 50MB dan kichik videolarni olish
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'quiet': True,
-            'noplaylist': True
-        }
+# --- TUGMALAR ---
+def sub_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    for ch in CHANNELS:
+        kb.add(InlineKeyboardButton("Kanalga a'zo bo'lish ➕", url=f"https://t.me/{ch[1:]}"))
+    kb.add(InlineKeyboardButton("Tekshirish ✅", callback_data="check_status"))
+    return kb
 
-# --- KEYBOARDS ---
-def sub_keyboard():
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton(text="📢 Kanalga obuna bo'lish", url=CHANNEL_LINK))
-    markup.add(InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_sub"))
-    return markup
+def admin_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("Statistika 📊", "Xabar yuborish 📢")
+    kb.add("Foydalanuvchilar ro'yxati 📋", "Bot holati ✅")
+    return kb
 
-def admin_keyboard():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(KeyboardButton("📊 Statistika"), KeyboardButton("✉️ Xabar yuborish"))
-    markup.add(KeyboardButton("🔒 Majburiy obuna: ON/OFF"), KeyboardButton("🔙 Chiqish"))
-    return markup
-
-# --- HANDLERS ---
-
+# --- START ---
 @dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    add_user(message.from_user.id, message.from_user.username)
+async def start(message: types.Message):
+    db.add_user(message.from_user.id, message.from_user.username)
     if await check_sub(message.from_user.id):
-        await message.answer(f"Assalomu alaykum, {message.from_user.first_name}!\n\n"
-                             "Men Instagram, TikTok, YouTube va boshqa tarmoqlardan video yuklovchi va musiqa topuvchi botman.\n\n"
-                             "🚀 **Ishlatish uchun:**\n"
-                             "1. Video linkini yuboring.\n"
-                             "2. Musiqa nomini yozing.", parse_mode="Markdown")
+        await message.answer(f"Xush kelibsiz, {message.from_user.first_name}!\nLink yuboring yoki musiqa nomini yozing.", reply_markup=types.ReplyKeyboardRemove())
     else:
-        await message.answer("⚠️ **Botdan foydalanish uchun kanalimizga obuna bo'ling!**", reply_markup=sub_keyboard(), parse_mode="Markdown")
-
-@dp.callback_query_handler(text="check_sub")
-async def callback_check_sub(call: types.CallbackQuery):
-    if await check_sub(call.from_user.id):
-        await call.message.delete()
-        await call.message.answer("✅ Obuna tasdiqlandi! Endi bemalol foydalanishingiz mumkin.")
-    else:
-        await call.answer("❌ Siz hali obuna bo'lmadingiz!", show_alert=True)
+        await message.answer("<b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:</b>", reply_markup=sub_kb())
 
 # --- ADMIN PANEL ---
 @dp.message_handler(commands=['admin'])
 async def admin_panel(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👨‍💻 Admin panelga xush kelibsiz!", reply_markup=admin_keyboard())
-    else:
-        pass # Admin bo'lmasa jim turadi
+        await message.answer("Admin panelga xush kelibsiz!", reply_markup=admin_keyboard())
 
-@dp.message_handler(lambda message: message.text == "📊 Statistika", user_id=ADMIN_ID)
-async def admin_stats(message: types.Message):
-    count = get_users_count()
-    await message.answer(f"📊 **Bot statistikasi:**\n\n👤 Foydalanuvchilar soni: {count} ta\n🤖 Bot holati: Aktiv", parse_mode="Markdown")
+@dp.message_handler(lambda m: m.text == "Statistika 📊")
+async def stats(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        count = db.count_users()
+        await message.answer(f"Botdagi jami foydalanuvchilar: <b>{count} ta</b>")
 
-@dp.message_handler(lambda message: message.text == "🔒 Majburiy obuna: ON/OFF", user_id=ADMIN_ID)
-async def toggle_sub(message: types.Message):
-    current = get_force_sub_status()
-    new_status = '0' if current == '1' else '1'
-    set_force_sub(new_status)
-    status_text = "Yoqildi ✅" if new_status == '1' else "O'chirildi ❌"
-    await message.answer(f"Majburiy obuna holati: {status_text}")
+@dp.message_handler(lambda m: m.text == "Xabar yuborish 📢")
+async def start_ad(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Reklama xabarini yuboring (Rasm, Video yoki Matn):")
+        await AdminStates.waiting_for_ad.set()
 
-@dp.message_handler(lambda message: message.text == "✉️ Xabar yuborish", user_id=ADMIN_ID)
-async def broadcast_start(message: types.Message):
-    await AdminState.broadcast.set()
-    await message.answer("Foydalanuvchilarga yuboriladigan xabarni (matn, rasm, video) yuboring. Bekor qilish uchun /cancel")
-
-@dp.message_handler(state=AdminState.broadcast, content_types=types.ContentTypes.ANY)
-async def broadcast_send(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.finish()
-        await message.answer("Bekor qilindi.", reply_markup=admin_keyboard())
-        return
-
-    users = get_all_users()
+@dp.message_handler(state=AdminStates.waiting_for_ad, content_types=types.ContentTypes.ANY)
+async def send_ad(message: types.Message, state: FSMContext):
+    users = db.get_users()
     count = 0
-    await message.answer(f"Xabar tarqatish boshlandi... ({len(users)} ta odamga)")
-    
-    for user_id in users:
+    for user in users:
         try:
-            await message.copy_to(user_id)
+            await message.copy_to(user[0])
             count += 1
-            await asyncio.sleep(0.05) # Spamdan himoya
-        except:
-            pass
-    
+            await asyncio.sleep(0.05)
+        except: pass
+    await message.answer(f"Xabar {count} ta foydalanuvchiga yetkazildi.")
     await state.finish()
-    await message.answer(f"✅ Xabar {count} ta foydalanuvchiga yetib bordi.", reply_markup=admin_keyboard())
 
-@dp.message_handler(lambda message: message.text == "🔙 Chiqish", user_id=ADMIN_ID)
-async def admin_exit(message: types.Message):
-    await message.answer("Admin paneldan chiqildi.", reply_markup=types.ReplyKeyboardRemove())
-
-# --- MAIN LOGIC (DOWNLOAD & SEARCH) ---
-
-@dp.message_handler(content_types=['text'])
-async def handle_text(message: types.Message):
-    # 1. Obunani tekshirish
+# --- MUSIQA QIDIRISH (1-10) ---
+@dp.message_handler(lambda m: not m.text.startswith("http") and not m.text.startswith("/"))
+async def music_search(message: types.Message):
     if not await check_sub(message.from_user.id):
-        await message.answer("⚠️ **Botdan foydalanish uchun kanalimizga obuna bo'ling!**", reply_markup=sub_keyboard(), parse_mode="Markdown")
-        return
+        return await message.answer("Obuna bo'lmagansiz!", reply_markup=sub_kb())
+    
+    query = message.text
+    results = YoutubeSearch(query, max_results=10).to_dict()
+    
+    if not results:
+        return await message.answer("Hech narsa topilmadi.")
 
-    text = message.text
-    msg = await message.answer("🔎 So'rovingiz ishlanmoqda...")
+    text = "🔍 <b>Natijalar:</b>\n\n"
+    kb = InlineKeyboardMarkup(row_width=5)
+    nums = []
+    for i, res in enumerate(results, 1):
+        text += f"{i}. <b>{res['title']}</b> | {res['duration']}\n"
+        nums.append(InlineKeyboardButton(text=str(i), callback_data=f"mp3_{res['id']}"))
+    
+    kb.add(*nums)
+    await message.answer(text, reply_markup=kb)
 
-    # 2. Agar LINK bo'lsa (Video yuklash)
-    if text.startswith("http"):
-        try:
-            ydl_opts = get_yt_opts(is_audio=False)
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(text, download=True)
-                filename = ydl.prepare_filename(info)
-                title = info.get('title', 'Video')
-                
-            # Videoni yuborish
-            with open(filename, 'rb') as video:
-                # Inline tugma: Audio yuklab olish
-                audio_kb = InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("🎵 Musiqasini yuklab olish", callback_data=f"getaudio|{title[:15]}")
-                ) # Title qisqartirildi, callback limit bor
-                await message.reply_video(video, caption=f"📹 {title}\n🤖 @{bot.get_me().username} orqali yuklandi", reply_markup=audio_kb)
-            
-            os.remove(filename)
-            await msg.delete()
-            
-        except Exception as e:
-            await msg.edit_text(f"❌ Kechirasiz, bu linkni yuklab bo'lmadi yoki fayl juda katta.\nXato: {str(e)[:50]}")
-            if os.path.exists('downloads'):
-                for f in os.listdir('downloads'):
-                    os.remove(os.path.join('downloads', f))
+# --- VIDEO YUKLASH ---
+@dp.message_handler(regexp=r'http')
+async def downloader(message: types.Message):
+    if not await check_sub(message.from_user.id):
+        return await message.answer("Obuna bo'lmagansiz!", reply_markup=sub_kb())
 
-    # 3. Agar ODDIY SO'Z bo'lsa (Musiqa qidirish)
-    else:
-        try:
-            # yt-dlp search
-            ydl_opts = {'quiet': True, 'default_search': 'ytsearch5', 'noplaylist': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(text, download=False)
-            
-            if 'entries' in info and info['entries']:
-                markup = InlineKeyboardMarkup(row_width=1)
-                results_text = "🎵 **Topilgan musiqalar:**\n\n"
-                
-                for i, entry in enumerate(info['entries']):
-                    title = entry.get('title', 'Noma\'lum')
-                    vid_id = entry.get('id')
-                    duration = entry.get('duration_string', '')
-                    results_text += f"{i+1}. {title} ({duration})\n"
-                    markup.add(InlineKeyboardButton(text=f"{i+1}. {title}", callback_data=f"dl_music|{vid_id}"))
-                
-                await msg.edit_text(results_text, reply_markup=markup, parse_mode="Markdown")
-            else:
-                await msg.edit_text("❌ Hech narsa topilmadi.")
-        except Exception as e:
-            await msg.edit_text("❌ Qidiruvda xatolik yuz berdi.")
+    wait = await message.answer("Yuklanmoqda... ⏳")
+    url = message.text
+    file_id = f"downloads/{message.from_user.id}"
 
-# --- CALLBACKS FOR MUSIC DOWNLOAD ---
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('dl_music|'))
-async def download_music_callback(call: types.CallbackQuery):
-    vid_id = call.data.split('|')[1]
-    link = f"https://www.youtube.com/watch?v={vid_id}"
-    await call.message.edit_text("🎵 Musiqa yuklanmoqda... Biroz kuting.")
+    ydl_opts = {'format': 'best', 'outtmpl': f'{file_id}.%(ext)s', 'noplaylist': True}
     
     try:
-        ydl_opts = get_yt_opts(is_audio=True)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(link, download=True)
+            info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            # Extension mp3 ga o'zgarishi mumkin postprocessor tufayli
-            filename = filename.rsplit('.', 1)[0] + '.mp3'
             
-        with open(filename, 'rb') as audio:
-            await call.message.answer_audio(audio, caption=f"🎧 @{ (await bot.get_me()).username}")
-        
-        os.remove(filename)
-        await call.message.delete()
-        
+            with open(filename, 'rb') as video:
+                kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Musiqasini yuklash 🎵", callback_data=f"mp3_{info['id']}"))
+                await message.answer_video(video, caption="Bajarildi ✅", reply_markup=kb)
+            os.remove(filename)
+            await wait.delete()
     except Exception as e:
-        await call.message.answer("❌ Musiqani yuklab bo'lmadi.")
+        await wait.edit_text("Xatolik! Link noto'g'ri yoki video juda katta.")
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('getaudio|'))
-async def extract_audio_from_video_callback(call: types.CallbackQuery):
-    # Bu yerda biz videoni qayta yuklab o'tirmaymiz, chunki biz linkni saqlamadik.
-    # Lekin professional yechimda "context" saqlash kerak. 
-    # Oddiylik uchun: Foydalanuvchiga "Musiqa nomini yozib qidiring" deymiz, 
-    # chunki videodan audio ajratish uchun fayl serverda turishi kerak (Renderda esa u o'chib ketadi).
-    # Yoki: Video linki xabarda bor. Uni reply qilib olsak bo'ladi.
+# --- CALLBACKS ---
+@dp.callback_query_handler(lambda c: c.data.startswith('mp3_'))
+async def get_audio(call: types.CallbackQuery):
+    vid_id = call.data.split("_")[1]
+    url = f"https://www.youtube.com/watch?v={vid_id}"
+    await call.message.answer("Musiqa tayyorlanmoqda... 🎧")
     
-    await call.answer("🎵 Musiqani qidirish uchun nomini botga yozing yoki linkni qayta tashlang.", show_alert=True)
-    # Eslatma: Render free tierda fayllarni uzoq saqlab bo'lmaydi, shuning uchun bu eng barqaror yo'l.
+    opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': f'downloads/{vid_id}.mp3',
+        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
+    }
+    
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+        with open(f"downloads/{vid_id}.mp3", 'rb') as audio:
+            await bot.send_audio(call.from_user.id, audio)
+        os.remove(f"downloads/{vid_id}.mp3")
 
-# --- RENDER UCHUN WEB SERVER (Keep-Alive) ---
-async def health_check(request):
-    return web.Response(text="Bot is running!")
+@dp.callback_query_handler(text="check_status")
+async def check_status(call: types.CallbackQuery):
+    if await check_sub(call.from_user.id):
+        await call.message.delete()
+        await bot.send_message(call.from_user.id, "Tabriklaymiz, obuna tasdiqlandi!")
+    else:
+        await call.answer("Hali obuna bo'lmagansiz!", show_alert=True)
 
-async def on_startup(dp):
-    db_start()
-    if not os.path.exists('downloads'):
-        os.makedirs('downloads')
-    await bot.set_webhook(url=f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook") # Webhook ishlatilsa
+# --- RENDER SERVER ---
+from flask import Flask
+from threading import Thread
+app = Flask('')
+@app.route('/')
+def home(): return "Bot is Alive"
+def run(): app.run(host='0.0.0.0', port=8080)
 
-# --- RENDER ENTRY POINT ---
 if __name__ == '__main__':
-    # Web serverni alohida thread yoki loopda ishlatish kerak,
-    # lekin Renderda eng osoni webhook yoki oddiy polling + dummy server.
-    # Polling ishlatamiz (osonroq), lekin Render talabi uchun port ochamiz.
-    
-    # 1. Background server
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    
-    runner = web.AppRunner(app)
-    
-    async def start_server():
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8080)))
-        await site.start()
-
-    # 2. Bot loop
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_server())
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    if not os.path.exists('downloads'): os.makedirs('downloads')
+    Thread(target=run).start()
+    executor.start_polling(dp, skip_updates=True)
