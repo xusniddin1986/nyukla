@@ -11,9 +11,9 @@ from youtube_search import YoutubeSearch
 from database import Database
 
 # --- KONFIGURATSIYA ---
-API_TOKEN = 'TOKENINGIZNI_YOZING'
-ADMIN_ID = 123456789 # O'zingizning ID
-CHANNELS = ["@kanal_nomi"] # Majburiy obuna
+API_TOKEN = '8679344041:AAGVo6gwxoyjWOPCSb3ezdtfgwJ7PkhhQaM'
+ADMIN_ID = 8553997595 # O'zingizning ID
+CHANNELS = ["@aclubnc"] # Majburiy obuna
 
 db = Database('bot_database.db')
 bot = Bot(token=API_TOKEN, parse_mode="HTML")
