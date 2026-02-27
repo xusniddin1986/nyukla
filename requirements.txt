@@ -6,3 +6,4 @@ aiosqlite>=0.19.0
 python-multipart
 aiohttp>=3.9.3
 pydantic>=2.6.0
+static-ffmpeg
