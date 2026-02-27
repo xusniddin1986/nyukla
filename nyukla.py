@@ -1,3 +1,4 @@
+import uvicorn
 import os
 import asyncio
 import logging
@@ -430,3 +431,9 @@ async def bot_webhook(request: Request):
 
 @app.get("/")
 async def root(): return {"status": "Bot is active", "version": "4.1.0 Enterprise"}
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    # Render bergan portni avtomatik oladi
+    port = int(os.environ.get("PORT", 8000)) 
+    uvicorn.run(app, host="0.0.0.0", port=port)
