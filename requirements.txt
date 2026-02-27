@@ -1,5 +1,5 @@
-aiogram==2.25.1
+aiogram
+fastapi
+uvicorn
 yt-dlp
-youtube-search-python
-youtube-search
-flask
+python-dotenv
