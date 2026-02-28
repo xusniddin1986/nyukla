@@ -59,47 +59,34 @@ logger = logging.getLogger("NyuklaBot")
 load_dotenv()
 
 class Config:
-    """Production darajasidagi konfiguratsiya va validatsiya klasi"""
-    try:
-        BOT_TOKEN = os.getenv("8679344041:AAGVo6gwxoyjWOPCSb3ezdtfgwJ7PkhhQaM")
-        if not BOT_TOKEN:
-            raise ValueError("BOT_TOKEN topilmadi!")
+    load_dotenv()  # .env faylni yuklash
 
-        ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "8553997595")
-        if not ADMIN_IDS_RAW:
-            raise ValueError("ADMIN_IDS topilmadi!")
-        ADMIN_IDS = [int(i.strip()) for i in ADMIN_IDS_RAW.split(",") if i.strip()]
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN topilmadi!")
 
-        DATABASE_URL = os.getenv("postgresql://nyukla_user:aWXI7hFmjhVVW6F2oqGUHUmasyJL4Qan@dpg-d6hh06k50q8c73aj7340-a/nyukla_db")
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL topilmadi!")
+    ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "").split(",") if i.strip()]
+    if not ADMIN_IDS:
+        raise ValueError("ADMIN_IDS topilmadi!")
 
-        WEBHOOK_HOST = os.getenv("https://nyukla.onrender.com")
-        if not WEBHOOK_HOST:
-            raise ValueError("WEBHOOK_HOST topilmadi!")
-        WEBHOOK_HOST = WEBHOOK_HOST.rstrip("/")
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL topilmadi!")
 
-        CHANNEL_ID = os.getenv("-1002980992642")
-        if not CHANNEL_ID:
-            raise ValueError("CHANNEL_ID topilmadi!")
-        # Agar channel id -100 bilan boshlanmasa, uni integerga o'girishda xato bo'lmasligi kerak
-        try:
-            CHANNEL_ID = int(CHANNEL_ID)
-        except ValueError:
-            pass # Username holatida qoldiramiz
+    WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
+    if not WEBHOOK_HOST:
+        raise ValueError("WEBHOOK_HOST topilmadi!")
+    WEBHOOK_HOST = WEBHOOK_HOST.rstrip("/")
 
-        CHANNEL_URL = os.getenv("https://t.me/aclubnc")
-        if not CHANNEL_URL:
-            raise ValueError("CHANNEL_URL topilmadi!")
-
-    except Exception as e:
-        logger.critical(f"CONFIG ERROR: {str(e)}")
-        sys.exit(1)
+    CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+    CHANNEL_URL = os.getenv("CHANNEL_URL")
+    if not CHANNEL_URL:
+        raise ValueError("CHANNEL_URL topilmadi!")
 
     WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
     WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
     DOWNLOAD_DIR = "downloads"
-    TEMP_CACHE_TTL = 3600  # Kesh yashash vaqti (1 soat)
+    TEMP_CACHE_TTL = 3600
 
 # Papkani yaratish
 if not os.path.exists(Config.DOWNLOAD_DIR):
