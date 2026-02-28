@@ -1,3 +1,4 @@
-flask
-pyTelegramBotAPI
+aiogram==3.10.0
 yt-dlp
+aiohttp
+certifi
