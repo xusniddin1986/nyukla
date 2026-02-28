@@ -6,3 +6,4 @@ SQLAlchemy>=2.0
 asyncpg
 python-dotenv
 uvicorn
+fastapi>=0.103.0
