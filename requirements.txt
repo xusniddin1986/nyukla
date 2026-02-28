@@ -1,6 +1,3 @@
-aiogram
-fastapi
-uvicorn
-aiosqlite
+flask
+pyTelegramBotAPI
 yt-dlp
-static-ffmpeg
