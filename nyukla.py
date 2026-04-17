@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import sqlite3
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import CommandStart, Command
@@ -10,15 +9,21 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.types import FSInputFile, CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 import yt_dlp
 
-# --- SOZLAMALAR ---
+# --- KONFIGURATSIYA ---
 BOT_TOKEN = os.getenv("8679344041:AAGS9_ugLxpyW2tFlPju5d7ZmEdiQ3qDIBM")
-ADMIN_ID = int(os.getenv("8553997595", 0)) # SIZNING TELEGRAM ID RAQAMINGIZ
+ADMIN_ID = int(os.getenv("8553997595", 0))
+# Render beradigan URL: https://loyihangiz-nomi.onrender.com
+RENDER_EXTERNAL_URL = os.getenv("https://nyukla.onrender.com") 
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+
 PORT = int(os.getenv("PORT", 8080))
-COOKIES_FILE = "cookies.txt"
 DB_FILE = "nyukla.db"
+COOKIES_FILE = "cookies.txt"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -370,30 +375,31 @@ async def handle_music_download(callback: CallbackQuery):
         logging.error(f"Musiqa yuklashda xato: {e}")
         await callback.message.edit_text("❌ Musiqani yuklashda xatolik yuz berdi.")
 
-# --- RENDER.COM UCHUN WEB-SERVER VA ISHGA TUSHIRISH ---
-async def health_check(request):
-    return web.Response(text="Nyukla Bot ishlab turibdi!")
-
-async def main():
-    if not BOT_TOKEN:
-        logging.error("BOT_TOKEN muhit o'zgaruvchisi topilmadi!")
-        return
-
+async def on_startup(bot: Bot):
     await init_db()
+    # Webhookni Telegramga ulash
+    await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
+    logging.info(f"Webhook o'rnatildi: {WEBHOOK_URL}")
 
+def main():
     app = web.Application()
-    app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logging.info(f"Veb server {PORT} portda ishga tushdi.")
+    
+    # Render "Health Check" uchun asosiy sahifa
+    async def health_check(request):
+        return web.Response(text="Bot is running smoothly!", status=200)
+    
+    app.router.add_get("/", health_check)
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    # Webhook so'rovlarini boshqarish
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+
+    setup_application(app, dp, bot=bot)
+    
+    app.on_startup.append(on_startup)
+    
+    # Render tomonidan berilgan PORTda serverni yurgizish
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot to'xtatildi.")
+    main()
