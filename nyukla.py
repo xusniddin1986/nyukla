@@ -1,200 +1,131 @@
-import logging
-import os
 import asyncio
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-from aiogram.filters import CommandStart
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.exceptions import TelegramAPIError
-from aiohttp import web
+import logging
+import sqlite3
+import os
 import yt_dlp
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, FSInputFile, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
-# --- KONFIGURATSIYA VA O'ZGARUVCHILAR ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8679344041:AAGS9_ugLxpyW2tFlPju5d7ZmEdiQ3qDIBM")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://nyukla.onrender.com") # Render.com bergan manzil
-WEBHOOK_PATH = f"/webhook/{8679344041:AAGS9_ugLxpyW2tFlPju5d7ZmEdiQ3qDIBM}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+# --- KONFIGURATSIYA ---
+BOT_TOKEN = "8679344041:AAFPAOq1vlF7EXUNvN-3KdiAbA8z0LORINc"
+ADMIN_ID = 8553997595  # O'z IDingizni yozing
+PORT = int(os.environ.get("PORT", 8080))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://nyukla.onrender.com") # Renderdan olgan URL
 
-# Render.com tomonidan avtomatik taqdim etiladigan port
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.getenv("PORT", 10000))
+DOWNLOAD_DIR = "downloads"
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
 
-# Kelajakda obuna tekshiruvi va admin nazorati uchun o'zgaruvchilar
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "-1002980992642") 
-ADMIN_ID = os.getenv("ADMIN_ID", "8553997595")
-
-# Loglarni sozlash
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-router = Router()
 
-# Yuklab olingan fayllar uchun papka
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# --- BAZA (SQLITE) ---
+conn = sqlite3.connect("bot_users.db")
+cursor = conn.cursor()
+cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT)")
+conn.commit()
 
-# Cookie faylni tekshirish
-COOKIE_FILE = "cookies.txt" if os.path.exists("cookies.txt") else None
+def add_user(user_id, username, full_name):
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", (user_id, username, full_name))
+    conn.commit()
 
-# --- YARDAMCHI ASINXRON FUNKSIYALAR (DRY Yondashuv) ---
-async def fetch_media_info(query: str, search_type: str = 'video'):
-    """yt-dlp yordamida media ma'lumotlarini asinxron tarzda olish"""
+def get_users():
+    cursor.execute("SELECT user_id, username, full_name FROM users")
+    return cursor.fetchall()
+
+# --- YARDAMCHI FUNKSIYALAR ---
+async def download_media(url: str):
+    # Instagram va YouTube uchun format sozlamalari
+    # YouTube uchun max 720p, Instagram uchun eng yaxshi sifat
     ydl_opts = {
-        'format': 'best',
-        'quiet': True,
-        'cookiefile': COOKIE_FILE,
-        'noplaylist': True,
+        "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
+        "quiet": True,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
-    
-    if search_type == 'music_search':
-        ydl_opts.update({
-            'extract_flat': 'in_playlist',
-            'default_search': 'ytsearch5',
-        })
-        
-    def _extract():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(query, download=False)
-            
-    return await asyncio.to_thread(_extract)
-
-async def download_media(url: str, is_audio: bool = False):
-    """Media faylni yuklab olish va fayl nomini qaytarish"""
-    filename_template = f"{DOWNLOAD_DIR}/%(id)s.%(ext)s"
-    
-    ydl_opts = {
-        'outtmpl': filename_template,
-        'quiet': True,
-        'cookiefile': COOKIE_FILE,
-    }
-    
-    if is_audio:
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
-    else:
-        # Video hajmi Telegram limitiga tushishi uchun (max 50MB)
-        ydl_opts.update({'format': 'best[filesize<50M]/best'})
-
     def _download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            # Fayl nomini olish
-            return ydl.prepare_filename(info).rsplit('.', 1)[0] + ('.mp3' if is_audio else f".{info['ext']}")
-
+            return ydl.prepare_filename(info)
     return await asyncio.to_thread(_download)
 
+# --- KEYBOARD ---
+admin_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📊 Statistika")],
+    [KeyboardButton(text="📢 Xabar yuborish")]
+], resize_keyboard=True)
+
 # --- HANDLERLAR ---
-
-@router.message(CommandStart())
+@dp.message(CommandStart())
 async def cmd_start(message: Message):
-    welcome_text = (
-        "👋 Salom! Men Nyukla botman.\n\n"
-        "🔗 *Instagram yoki YouTube* havolasini yuboring (video yuklab beraman).\n"
-        "🎵 Yoki *musiqa/qo'shiqchi nomini* yozing (musiqa topib beraman)."
-    )
-    await message.answer(welcome_text, parse_mode="Markdown")
+    add_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Admin xush kelibsiz!", reply_markup=admin_kb)
+    else:
+        await message.answer("Salom! Menga YouTube yoki Instagram havolasini yuboring.")
 
-# Havolalarni ushlab qoluvchi (Video yuklash)
-@router.message(F.text.regexp(r"(https?://)?(www\.)?(youtube\.com|youtu\.be|instagram\.com)/.+"))
-async def handle_video_link(message: Message):
-    wait_msg = await message.answer("⏳ Video qidirilmoqda, kuting...")
-    try:
-        file_path = await download_media(message.text, is_audio=False)
-        video = FSInputFile(file_path)
-        caption = "📥 @NyuklaBot orqali yuklab olindi"
-        
-        await bot.send_video(
-            chat_id=message.chat.id,
-            video=video,
-            caption=caption
-        )
-        os.remove(file_path) # Server joyini tejash uchun
-    except Exception as e:
-        logger.error(f"Video yuklashda xatolik: {e}")
-        await message.answer("❌ Videoni yuklab olishda xatolik yuz berdi. Fayl hajmi juda katta bo'lishi mumkin.")
-    finally:
-        await wait_msg.delete()
+@dp.message(F.text == "📊 Statistika")
+async def show_stats(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        users = get_users()
+        stats_text = f"👥 Jami foydalanuvchilar: {len(users)}\n\n"
+        for u in users:
+            stats_text += f"👤 {u[2]} (@{u[1] or 'Yoq'})\n"
+        await message.answer(stats_text)
 
-# Musiqa qidiruv (Matn yozilganda)
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_music_search(message: Message):
-    wait_msg = await message.answer("🔍 Musiqa qidirilmoqda...")
-    try:
-        results = await fetch_media_info(message.text, search_type='music_search')
-        entries = results.get('entries', [])
-        
-        if not entries:
-            await wait_msg.edit_text("❌ Hech narsa topilmadi.")
-            return
+@dp.message(F.text == "📢 Xabar yuborish")
+async def start_broadcast(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Iltimos, foydalanuvchilarga yubormoqchi bo'lgan xabaringizni (matn, rasm, video yoki audio) yuboring.")
+        # Bu yerda holatni saqlash uchun FSM ishlatish tavsiya etiladi
 
-        keyboard = []
-        for entry in entries[:5]: # Eng yaxshi 5 ta natija
-            title = entry.get('title', 'Noma\'lum')
-            video_id = entry.get('id')
-            # Callback data ga faqat ID saqlaymiz (limit sababli)
-            keyboard.append([InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"dl_audio:{video_id}")])
-            
-        markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        await wait_msg.edit_text(
-            "👇 Quyidagilardan birini tanlang:",
-            reply_markup=markup
-        )
-    except Exception as e:
-        logger.error(f"Qidiruvda xatolik: {e}")
-        await wait_msg.edit_text("❌ Qidiruv tizimida xatolik yuz berdi.")
+@dp.message(F.video | F.photo | F.text | F.audio)
+async def handle_broadcast(message: Message):
+    if message.from_user.id == ADMIN_ID and message.reply_to_message:
+        # Oddiy broadcast logikasi (soddalashtirilgan)
+        users = get_users()
+        count = 0
+        for user in users:
+            try:
+                if message.text: await bot.send_message(user[0], message.text)
+                elif message.video: await bot.send_video(user[0], message.video.file_id, caption=message.caption)
+                elif message.photo: await bot.send_photo(user[0], message.photo[-1].file_id, caption=message.caption)
+                elif message.audio: await bot.send_audio(user[0], message.audio.file_id, caption=message.caption)
+                count += 1
+            except: continue
+        await message.answer(f"✅ Xabar {count} ta foydalanuvchiga yuborildi.")
+        return
 
-# Musiqa yuklash tugmasi bosilganda
-@router.callback_query(F.data.startswith("dl_audio:"))
-async def process_audio_download(callback: CallbackQuery):
-    video_id = callback.data.split(":")[1]
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    await callback.message.edit_text("⏳ Musiqa yuklanmoqda, iltimos kuting...")
-    
-    try:
-        file_path = await download_media(url, is_audio=True)
-        audio = FSInputFile(file_path)
-        caption = "@NyuklaBot orqali istagan musiqangizni tez va oson toping!"
-        
-        await bot.send_audio(
-            chat_id=callback.message.chat.id,
-            audio=audio,
-            caption=caption
-        )
-        os.remove(file_path) # Tozalash
-        await callback.message.delete()
-    except Exception as e:
-        logger.error(f"Audio yuklashda xatolik: {e}")
-        await callback.message.edit_text("❌ Musiqani yuklab olishda xatolik yuz berdi.")
+    # Yuklab olish funksiyasi
+    if "youtube.com" in message.text or "youtu.be" in message.text or "instagram.com" in message.text:
+        status_msg = await message.answer("⏳ Yuklanmoqda...")
+        try:
+            file_path = await download_media(message.text)
+            await bot.send_video(message.chat.id, video=FSInputFile(file_path))
+            await status_msg.delete()
+            if os.path.exists(file_path): os.remove(file_path)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Xatolik: {e}")
 
-# --- WEBHOOK SETUP (Render.com uchun) ---
+# --- WEBHOOK VA ISHGA TUSHIRISH ---
 async def on_startup(bot: Bot):
-    await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook o'rnatildi: {WEBHOOK_URL}")
+    await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
 
-def main():
-    dp.include_router(router)
+async def main():
     dp.startup.register(on_startup)
-    
     app = web.Application()
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-    
+    webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_requests_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
-    
-    logger.info(f"Server {WEBAPP_HOST}:{WEBAPP_PORT} da ishga tushirilmoqda...")
-    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
