@@ -3,8 +3,7 @@ import os
 from datetime import datetime
 from config import OWNER_ID
 
-DB_FILE = "data/database.json"
-
+DB_FILE = "data/db.json"
 
 def _load():
     os.makedirs("data", exist_ok=True)
@@ -13,131 +12,113 @@ def _load():
     with open(DB_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def _save(data):
     os.makedirs("data", exist_ok=True)
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
 def _default():
     return {
         "users": {},
         "admins": [OWNER_ID] if OWNER_ID else [],
-        "required_channels": [],
-        "bot_active": True,
-        "stats": {
-            "total_downloads": 0,
-            "total_music_searches": 0
-        }
+        "channels": [],
+        "bot_on": True,
+        "stats": {"downloads": 0, "searches": 0}
     }
 
-
-class Database:
-    def add_user(self, user_id: int, username: str = None, full_name: str = None):
-        data = _load()
-        uid = str(user_id)
-        if uid not in data["users"]:
-            data["users"][uid] = {
-                "id": user_id,
-                "username": username,
-                "full_name": full_name,
-                "joined": datetime.now().isoformat(),
-                "downloads": 0,
-                "searches": 0
-            }
+class DB:
+    def add_user(self, uid, username=None, full_name=None):
+        d = _load()
+        key = str(uid)
+        if key not in d["users"]:
+            d["users"][key] = {"id": uid, "username": username, "full_name": full_name,
+                                "joined": datetime.now().isoformat(), "downloads": 0, "searches": 0}
         else:
-            if username:
-                data["users"][uid]["username"] = username
-            if full_name:
-                data["users"][uid]["full_name"] = full_name
-        _save(data)
+            if username: d["users"][key]["username"] = username
+            if full_name: d["users"][key]["full_name"] = full_name
+        _save(d)
 
-    def get_all_users(self):
-        data = _load()
-        return list(data["users"].values())
+    def get_users(self):
+        return list(_load()["users"].values())
 
     def get_user_count(self):
-        data = _load()
-        return len(data["users"])
+        return len(_load()["users"])
 
     def get_admins(self):
-        data = _load()
-        admins = data.get("admins", [])
+        d = _load()
+        admins = d.get("admins", [])
         if OWNER_ID and OWNER_ID not in admins:
             admins.append(OWNER_ID)
         return admins
 
-    def add_admin(self, user_id: int):
-        data = _load()
-        if user_id not in data["admins"]:
-            data["admins"].append(user_id)
-            _save(data)
+    def add_admin(self, uid):
+        d = _load()
+        if uid not in d["admins"]:
+            d["admins"].append(uid)
+            _save(d)
             return True
         return False
 
-    def remove_admin(self, user_id: int):
-        data = _load()
-        if user_id in data["admins"] and user_id != OWNER_ID:
-            data["admins"].remove(user_id)
-            _save(data)
+    def remove_admin(self, uid):
+        d = _load()
+        if uid in d["admins"] and uid != OWNER_ID:
+            d["admins"].remove(uid)
+            _save(d)
             return True
         return False
 
-    def get_required_channels(self):
-        data = _load()
-        return data.get("required_channels", [])
+    def get_channels(self):
+        return _load().get("channels", [])
 
-    def add_channel(self, channel: str):
-        data = _load()
-        if channel not in data["required_channels"]:
-            data["required_channels"].append(channel)
-            _save(data)
+    def add_channel(self, ch):
+        d = _load()
+        if ch not in d["channels"]:
+            d["channels"].append(ch)
+            _save(d)
             return True
         return False
 
-    def remove_channel(self, channel: str):
-        data = _load()
-        if channel in data["required_channels"]:
-            data["required_channels"].remove(channel)
-            _save(data)
+    def remove_channel(self, ch):
+        d = _load()
+        if ch in d["channels"]:
+            d["channels"].remove(ch)
+            _save(d)
             return True
         return False
 
-    def get_bot_status(self):
-        data = _load()
-        return data.get("bot_active", True)
+    def is_active(self):
+        return _load().get("bot_on", True)
 
-    def set_bot_status(self, status: bool):
-        data = _load()
-        data["bot_active"] = status
-        _save(data)
+    def set_active(self, val):
+        d = _load()
+        d["bot_on"] = val
+        _save(d)
 
-    def increment_downloads(self, user_id: int):
-        data = _load()
-        uid = str(user_id)
-        if uid in data["users"]:
-            data["users"][uid]["downloads"] = data["users"][uid].get("downloads", 0) + 1
-        data["stats"]["total_downloads"] = data["stats"].get("total_downloads", 0) + 1
-        _save(data)
+    def inc_download(self, uid):
+        d = _load()
+        key = str(uid)
+        if key in d["users"]:
+            d["users"][key]["downloads"] = d["users"][key].get("downloads", 0) + 1
+        d["stats"]["downloads"] = d["stats"].get("downloads", 0) + 1
+        _save(d)
 
-    def increment_searches(self, user_id: int):
-        data = _load()
-        uid = str(user_id)
-        if uid in data["users"]:
-            data["users"][uid]["searches"] = data["users"][uid].get("searches", 0) + 1
-        data["stats"]["total_music_searches"] = data["stats"].get("total_music_searches", 0) + 1
-        _save(data)
+    def inc_search(self, uid):
+        d = _load()
+        key = str(uid)
+        if key in d["users"]:
+            d["users"][key]["searches"] = d["users"][key].get("searches", 0) + 1
+        d["stats"]["searches"] = d["stats"].get("searches", 0) + 1
+        _save(d)
 
     def get_stats(self):
-        data = _load()
+        d = _load()
         return {
-            "users": len(data["users"]),
-            "admins": len(data.get("admins", [])),
-            "total_downloads": data["stats"].get("total_downloads", 0),
-            "total_music_searches": data["stats"].get("total_music_searches", 0),
-            "bot_active": data.get("bot_active", True)
+            "users": len(d["users"]),
+            "admins": len(d.get("admins", [])),
+            "downloads": d["stats"].get("downloads", 0),
+            "searches": d["stats"].get("searches", 0),
+            "bot_on": d.get("bot_on", True),
+            "channels": len(d.get("channels", []))
         }
 
-
-db = Database()
+db = DB()
