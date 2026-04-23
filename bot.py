@@ -13,7 +13,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-import aiohttp
 
 from config import (
     BOT_TOKEN, ADMIN_IDS, CHANNEL_ID, CHANNEL_LINK,
@@ -47,7 +46,6 @@ class AdminStates(StatesGroup):
 
 # ─── Helpers ──────────────────────────────────────────────────
 async def check_subscription(user_id: int) -> bool:
-    """Foydalanuvchi kanallarga obuna bo'lganligini tekshirish"""
     channels = db.get_required_channels()
     if not channels:
         return True
@@ -62,7 +60,6 @@ async def check_subscription(user_id: int) -> bool:
 
 
 async def send_subscription_message(message: Message):
-    """Obuna bo'lish xabari yuborish"""
     channels = db.get_required_channels()
     buttons = []
     for ch in channels:
@@ -70,12 +67,12 @@ async def send_subscription_message(message: Message):
             chat = await bot.get_chat(ch)
             invite = await bot.export_chat_invite_link(ch)
             buttons.append([InlineKeyboardButton(
-                text=f"📢 {chat.title}",
+                text="📢 " + chat.title,
                 url=invite
             )])
         except Exception:
             buttons.append([InlineKeyboardButton(
-                text=f"📢 Kanal",
+                text="📢 Kanal",
                 url=CHANNEL_LINK
             )])
     buttons.append([InlineKeyboardButton(
@@ -125,15 +122,15 @@ async def cmd_start(message: Message):
         await send_subscription_message(message)
         return
 
-    await message.answer(
-        f"👋 Salom, <b>{user.full_name}</b>!\n\n"
+    text = (
+        "👋 Salom, <b>" + user.full_name + "</b>!\n\n"
         "🎵 <b>NyuklaBot</b> — video va musiqa yuklovchi bot\n\n"
         "📌 <b>Nima qila olaman:</b>\n"
         "• Video havolasini yuboring → videoni yuklab beraman\n"
         "• Musiqa nomi/ijrochi ismini yuboring → ro'yhat chiqaraman\n\n"
-        "⚡ Tez, bepul va qulay!",
-        parse_mode="HTML"
+        "⚡ Tez, bepul va qulay!"
     )
+    await message.answer(text, parse_mode="HTML")
 
 
 # ─── /help ────────────────────────────────────────────────────
@@ -145,7 +142,8 @@ async def cmd_help(message: Message):
     await message.answer(
         "📖 <b>Yordam</b>\n\n"
         "🔗 <b>Video yuklab olish:</b>\n"
-        "YouTube, Instagram, Facebook, TikTok, Pinterest va boshqa platformalardan video havolasini yuboring\n\n"
+        "YouTube, Instagram, Facebook, TikTok, Pinterest va boshqa platformalardan "
+        "video havolasini yuboring\n\n"
         "🎵 <b>Musiqa qidirish:</b>\n"
         "Musiqa nomi yoki ijrochi ismini yuboring, bot 1-5 ta natija ko'rsatadi\n\n"
         "📋 <b>Buyruqlar:</b>\n"
@@ -186,14 +184,14 @@ async def cmd_admin(message: Message):
     )
 
 
-# ─── Subscription Check Callback ──────────────────────────────
+# ─── Subscription Check ────────────────────────────────────────
 @dp.callback_query(F.data == "check_subscription")
 async def check_sub_callback(callback: CallbackQuery):
     if await check_subscription(callback.from_user.id):
         await callback.message.delete()
-        user = callback.from_user
+        name = callback.from_user.full_name
         await callback.message.answer(
-            f"✅ <b>Rahmat, {user.full_name}!</b>\n\n"
+            "✅ <b>Rahmat, " + name + "!</b>\n\n"
             "Endi botdan foydalanishingiz mumkin 🎉\n"
             "Video havola yoki musiqa nomini yuboring!",
             parse_mode="HTML"
@@ -202,7 +200,7 @@ async def check_sub_callback(callback: CallbackQuery):
         await callback.answer("❌ Siz hali obuna bo'lmadingiz!", show_alert=True)
 
 
-# ─── Music Search Callbacks ───────────────────────────────────
+# ─── Music Download Callback ──────────────────────────────────
 @dp.callback_query(F.data.startswith("dl_music_"))
 async def download_music_callback(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
@@ -217,14 +215,17 @@ async def download_music_callback(callback: CallbackQuery):
     try:
         result = await music_searcher.download_track(track_id)
         if result and result.get('file'):
+            title = result.get('title') or "Noma'lum"
+            artist = result.get('artist') or "Noma'lum"
             caption = (
-                f"🎵 <b>{result.get('title', 'Noma\'lum')}</b>\n"
-                f"👤 {result.get('artist', 'Noma\'lum')}\n\n"
-                f"📥 @NyuklaBot orqali istagan musiqangizni tez va oson toping!"
+                "🎵 <b>" + title + "</b>\n"
+                "👤 " + artist + "\n\n"
+                "📥 @NyuklaBot orqali istagan musiqangizni tez va oson toping!"
             )
+            audio_file = types.FSInputFile(result['file'])
             await bot.send_audio(
                 callback.from_user.id,
-                audio=types.FSInputFile(result['file']),
+                audio=audio_file,
                 caption=caption,
                 parse_mode="HTML"
             )
@@ -233,15 +234,15 @@ async def download_music_callback(callback: CallbackQuery):
         else:
             await callback.message.answer("❌ Musiqa yuklab bo'lmadi. Qayta urinib ko'ring.")
     except Exception as e:
-        logger.error(f"Music download error: {e}")
+        logger.error("Music download error: %s", e)
         await callback.message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.")
     finally:
         await msg.delete()
 
 
+# ─── Video Music Search Callback ─────────────────────────────
 @dp.callback_query(F.data.startswith("video_music_"))
 async def video_music_callback(callback: CallbackQuery):
-    """Videodagi musiqani qidirish"""
     if not await check_subscription(callback.from_user.id):
         await callback.answer("❌ Avval kanalga obuna bo'ling!", show_alert=True)
         return
@@ -257,10 +258,11 @@ async def video_music_callback(callback: CallbackQuery):
             text = "🎵 <b>Mos musiqalar:</b>\n\n"
             buttons = []
             for i, track in enumerate(results[:5], 1):
-                text += f"{i}. <b>{track['title']}</b> — {track['artist']}\n"
+                text += str(i) + ". <b>" + track['title'] + "</b> — " + track['artist'] + "\n"
+                btn_text = str(i) + ". " + track['title'][:30]
                 buttons.append([InlineKeyboardButton(
-                    text=f"{i}. {track['title'][:30]}",
-                    callback_data=f"dl_music_{track['id']}"
+                    text=btn_text,
+                    callback_data="dl_music_" + track['id']
                 )])
             text += "\n📥 @NyuklaBot orqali istagan musiqangizni tez va oson toping!"
             kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -268,29 +270,30 @@ async def video_music_callback(callback: CallbackQuery):
         else:
             await callback.message.answer("❌ Musiqa topilmadi.")
     except Exception as e:
-        logger.error(f"Video music search error: {e}")
+        logger.error("Video music search error: %s", e)
         await callback.message.answer("❌ Xatolik yuz berdi.")
     finally:
         await msg.delete()
 
 
-# ─── Admin Panel Handlers ─────────────────────────────────────
+# ─── Admin: Statistika ────────────────────────────────────────
 @dp.message(F.text == "📊 Statistika")
 async def admin_stats(message: Message):
     if not is_admin(message.from_user.id):
         return
     stats = db.get_stats()
     await message.answer(
-        f"📊 <b>Bot Statistikasi</b>\n\n"
-        f"👥 Jami foydalanuvchilar: <b>{stats['total']}</b>\n"
-        f"📅 Bugun qo'shilganlar: <b>{stats['today']}</b>\n"
-        f"📆 Shu hafta: <b>{stats['week']}</b>\n"
-        f"📆 Shu oy: <b>{stats['month']}</b>",
+        "📊 <b>Bot Statistikasi</b>\n\n"
+        "👥 Jami foydalanuvchilar: <b>" + str(stats['total']) + "</b>\n"
+        "📅 Bugun qo'shilganlar: <b>" + str(stats['today']) + "</b>\n"
+        "📆 Shu hafta: <b>" + str(stats['week']) + "</b>\n"
+        "📆 Shu oy: <b>" + str(stats['month']) + "</b>",
         parse_mode="HTML",
         reply_markup=admin_keyboard()
     )
 
 
+# ─── Admin: Foydalanuvchilar ──────────────────────────────────
 @dp.message(F.text == "👥 Foydalanuvchilar")
 async def admin_users(message: Message):
     if not is_admin(message.from_user.id):
@@ -298,12 +301,13 @@ async def admin_users(message: Message):
     users = db.get_all_users(limit=20)
     text = "👥 <b>Oxirgi 20 foydalanuvchi:</b>\n\n"
     for u in users:
-        name = u[2] or "Nomsiz"
-        username = f"@{u[1]}" if u[1] else "username yo'q"
-        text += f"• {name} | {username} | <code>{u[0]}</code>\n"
+        name = u[2] if u[2] else "Nomsiz"
+        username = "@" + u[1] if u[1] else "username yo'q"
+        text += "• " + name + " | " + username + " | <code>" + str(u[0]) + "</code>\n"
     await message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 
+# ─── Admin: Bot holati ────────────────────────────────────────
 @dp.message(F.text == "🤖 Bot holati")
 async def admin_bot_status(message: Message):
     if not is_admin(message.from_user.id):
@@ -311,17 +315,18 @@ async def admin_bot_status(message: Message):
     stats = db.get_stats()
     channels = db.get_required_channels()
     admins = db.get_admins()
-    status_text = (
-        f"🤖 <b>Bot Holati</b>\n\n"
-        f"✅ Bot ishlayapti\n"
-        f"👥 Foydalanuvchilar: {stats['total']}\n"
-        f"📢 Majburiy kanallar: {len(channels)}\n"
-        f"👑 Adminlar: {len(admins) + len(ADMIN_IDS)}\n"
-        f"🌐 Webhook: Faol"
+    text = (
+        "🤖 <b>Bot Holati</b>\n\n"
+        "✅ Bot ishlayapti\n"
+        "👥 Foydalanuvchilar: " + str(stats['total']) + "\n"
+        "📢 Majburiy kanallar: " + str(len(channels)) + "\n"
+        "👑 Adminlar: " + str(len(admins) + len(ADMIN_IDS)) + "\n"
+        "🌐 Webhook: Faol"
     )
-    await message.answer(status_text, parse_mode="HTML", reply_markup=admin_keyboard())
+    await message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 
+# ─── Admin: Majburiy obuna ────────────────────────────────────
 @dp.message(F.text == "🔔 Majburiy obuna")
 async def admin_channels_menu(message: Message):
     if not is_admin(message.from_user.id):
@@ -330,7 +335,7 @@ async def admin_channels_menu(message: Message):
     text = "🔔 <b>Majburiy kanallar:</b>\n\n"
     if channels:
         for ch in channels:
-            text += f"• <code>{ch}</code>\n"
+            text += "• <code>" + ch + "</code>\n"
     else:
         text += "Hech qanday kanal yo'q\n"
 
@@ -341,6 +346,7 @@ async def admin_channels_menu(message: Message):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+# ─── Admin: Adminlar ──────────────────────────────────────────
 @dp.message(F.text == "👑 Adminlar")
 async def admin_admins_menu(message: Message):
     if not is_admin(message.from_user.id):
@@ -349,7 +355,7 @@ async def admin_admins_menu(message: Message):
     all_admins = list(set(ADMIN_IDS + admins))
     text = "👑 <b>Adminlar ro'yxati:</b>\n\n"
     for a in all_admins:
-        text += f"• <code>{a}</code>\n"
+        text += "• <code>" + str(a) + "</code>\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="add_admin")],
@@ -358,15 +364,18 @@ async def admin_admins_menu(message: Message):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+# ─── Admin: Asosiy menyu ──────────────────────────────────────
 @dp.message(F.text == "🏠 Asosiy menyu")
 async def main_menu(message: Message):
     await message.answer("🏠 Asosiy menyuga qaytdingiz", reply_markup=ReplyKeyboardRemove())
 
 
-# ─── Admin Callbacks ──────────────────────────────────────────
+# ─── Admin Callbacks: Channel ─────────────────────────────────
 @dp.callback_query(F.data == "add_channel")
 async def cb_add_channel(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("📢 Kanal username'ini yuboring (masalan: @mychannel yoki -100xxxxxxxxx):")
+    await callback.message.answer(
+        "📢 Kanal username yuboring (masalan: @mychannel yoki -100xxxxxxxxx):"
+    )
     await state.set_state(AdminStates.add_channel)
     await callback.answer()
 
@@ -375,7 +384,11 @@ async def cb_add_channel(callback: CallbackQuery, state: FSMContext):
 async def process_add_channel(message: Message, state: FSMContext):
     ch = message.text.strip()
     db.add_required_channel(ch)
-    await message.answer(f"✅ <code>{ch}</code> kanal qo'shildi!", parse_mode="HTML", reply_markup=admin_keyboard())
+    await message.answer(
+        "✅ <code>" + ch + "</code> kanal qo'shildi!",
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
     await state.clear()
 
 
@@ -390,10 +403,15 @@ async def cb_remove_channel(callback: CallbackQuery, state: FSMContext):
 async def process_remove_channel(message: Message, state: FSMContext):
     ch = message.text.strip()
     db.remove_required_channel(ch)
-    await message.answer(f"✅ <code>{ch}</code> kanal o'chirildi!", parse_mode="HTML", reply_markup=admin_keyboard())
+    await message.answer(
+        "✅ <code>" + ch + "</code> kanal o'chirildi!",
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
     await state.clear()
 
 
+# ─── Admin Callbacks: Admin ───────────────────────────────────
 @dp.callback_query(F.data == "add_admin")
 async def cb_add_admin(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("👤 Yangi admin user ID'sini yuboring:")
@@ -406,9 +424,13 @@ async def process_add_admin(message: Message, state: FSMContext):
     try:
         admin_id = int(message.text.strip())
         db.add_admin(admin_id)
-        await message.answer(f"✅ Admin qo'shildi: <code>{admin_id}</code>", parse_mode="HTML", reply_markup=admin_keyboard())
+        await message.answer(
+            "✅ Admin qo'shildi: <code>" + str(admin_id) + "</code>",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard()
+        )
     except ValueError:
-        await message.answer("❌ Noto'g'ri ID formati!")
+        await message.answer("❌ Noto'g'ri ID formati! Faqat raqam kiriting.")
     await state.clear()
 
 
@@ -424,13 +446,17 @@ async def process_del_admin(message: Message, state: FSMContext):
     try:
         admin_id = int(message.text.strip())
         db.remove_admin(admin_id)
-        await message.answer(f"✅ Admin o'chirildi: <code>{admin_id}</code>", parse_mode="HTML", reply_markup=admin_keyboard())
+        await message.answer(
+            "✅ Admin o'chirildi: <code>" + str(admin_id) + "</code>",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard()
+        )
     except ValueError:
-        await message.answer("❌ Noto'g'ri ID formati!")
+        await message.answer("❌ Noto'g'ri ID formati! Faqat raqam kiriting.")
     await state.clear()
 
 
-# ─── Broadcast ────────────────────────────────────────────────
+# ─── Admin: Broadcast Menu ────────────────────────────────────
 @dp.message(F.text == "📢 Xabar yuborish")
 async def admin_broadcast_menu(message: Message):
     if not is_admin(message.from_user.id):
@@ -455,7 +481,8 @@ async def bc_text(callback: CallbackQuery, state: FSMContext):
 async def do_broadcast_text(message: Message, state: FSMContext):
     users = db.get_all_users()
     sent, failed = 0, 0
-    msg = await message.answer(f"⏳ Xabar yuborilmoqda... 0/{len(users)}")
+    total = len(users)
+    msg = await message.answer("⏳ Xabar yuborilmoqda... 0/" + str(total))
     for i, user in enumerate(users):
         try:
             await bot.send_message(user[0], message.text)
@@ -463,9 +490,13 @@ async def do_broadcast_text(message: Message, state: FSMContext):
         except Exception:
             failed += 1
         if i % 20 == 0:
-            await msg.edit_text(f"⏳ Xabar yuborilmoqda... {i}/{len(users)}")
+            await msg.edit_text("⏳ Xabar yuborilmoqda... " + str(i) + "/" + str(total))
         await asyncio.sleep(0.05)
-    await msg.edit_text(f"✅ Xabar yuborildi!\n✅ Muvaffaqiyatli: {sent}\n❌ Xato: {failed}")
+    await msg.edit_text(
+        "✅ Xabar yuborildi!\n"
+        "✅ Muvaffaqiyatli: " + str(sent) + "\n"
+        "❌ Xato: " + str(failed)
+    )
     await state.clear()
 
 
@@ -480,9 +511,10 @@ async def bc_photo(callback: CallbackQuery, state: FSMContext):
 async def do_broadcast_photo(message: Message, state: FSMContext):
     users = db.get_all_users()
     sent, failed = 0, 0
+    total = len(users)
     photo = message.photo[-1].file_id
     caption = message.caption or ""
-    msg = await message.answer(f"⏳ Rasm yuborilmoqda... 0/{len(users)}")
+    msg = await message.answer("⏳ Rasm yuborilmoqda... 0/" + str(total))
     for i, user in enumerate(users):
         try:
             await bot.send_photo(user[0], photo, caption=caption)
@@ -490,9 +522,13 @@ async def do_broadcast_photo(message: Message, state: FSMContext):
         except Exception:
             failed += 1
         if i % 20 == 0:
-            await msg.edit_text(f"⏳ Rasm yuborilmoqda... {i}/{len(users)}")
+            await msg.edit_text("⏳ Rasm yuborilmoqda... " + str(i) + "/" + str(total))
         await asyncio.sleep(0.05)
-    await msg.edit_text(f"✅ Rasm yuborildi!\n✅ Muvaffaqiyatli: {sent}\n❌ Xato: {failed}")
+    await msg.edit_text(
+        "✅ Rasm yuborildi!\n"
+        "✅ Muvaffaqiyatli: " + str(sent) + "\n"
+        "❌ Xato: " + str(failed)
+    )
     await state.clear()
 
 
@@ -507,9 +543,10 @@ async def bc_video(callback: CallbackQuery, state: FSMContext):
 async def do_broadcast_video(message: Message, state: FSMContext):
     users = db.get_all_users()
     sent, failed = 0, 0
+    total = len(users)
     video = message.video.file_id
     caption = message.caption or ""
-    msg = await message.answer(f"⏳ Video yuborilmoqda... 0/{len(users)}")
+    msg = await message.answer("⏳ Video yuborilmoqda... 0/" + str(total))
     for i, user in enumerate(users):
         try:
             await bot.send_video(user[0], video, caption=caption)
@@ -517,9 +554,13 @@ async def do_broadcast_video(message: Message, state: FSMContext):
         except Exception:
             failed += 1
         if i % 20 == 0:
-            await msg.edit_text(f"⏳ Video yuborilmoqda... {i}/{len(users)}")
+            await msg.edit_text("⏳ Video yuborilmoqda... " + str(i) + "/" + str(total))
         await asyncio.sleep(0.05)
-    await msg.edit_text(f"✅ Video yuborildi!\n✅ Muvaffaqiyatli: {sent}\n❌ Xato: {failed}")
+    await msg.edit_text(
+        "✅ Video yuborildi!\n"
+        "✅ Muvaffaqiyatli: " + str(sent) + "\n"
+        "❌ Xato: " + str(failed)
+    )
     await state.clear()
 
 
@@ -534,9 +575,10 @@ async def bc_audio(callback: CallbackQuery, state: FSMContext):
 async def do_broadcast_audio(message: Message, state: FSMContext):
     users = db.get_all_users()
     sent, failed = 0, 0
+    total = len(users)
     audio = message.audio.file_id
     caption = message.caption or ""
-    msg = await message.answer(f"⏳ Audio yuborilmoqda... 0/{len(users)}")
+    msg = await message.answer("⏳ Audio yuborilmoqda... 0/" + str(total))
     for i, user in enumerate(users):
         try:
             await bot.send_audio(user[0], audio, caption=caption)
@@ -544,9 +586,13 @@ async def do_broadcast_audio(message: Message, state: FSMContext):
         except Exception:
             failed += 1
         if i % 20 == 0:
-            await msg.edit_text(f"⏳ Audio yuborilmoqda... {i}/{len(users)}")
+            await msg.edit_text("⏳ Audio yuborilmoqda... " + str(i) + "/" + str(total))
         await asyncio.sleep(0.05)
-    await msg.edit_text(f"✅ Audio yuborildi!\n✅ Muvaffaqiyatli: {sent}\n❌ Xato: {failed}")
+    await msg.edit_text(
+        "✅ Audio yuborildi!\n"
+        "✅ Muvaffaqiyatli: " + str(sent) + "\n"
+        "❌ Xato: " + str(failed)
+    )
     await state.clear()
 
 
@@ -562,36 +608,37 @@ async def handle_text(message: Message):
 
     text = message.text.strip()
 
-    # Admin panel tugmalar
-    if is_admin(user.id) and text in [
+    # Admin tugmalar — yuqoridagi handlerlarda ishlanadi
+    admin_buttons = [
         "📢 Xabar yuborish", "👥 Foydalanuvchilar", "📊 Statistika",
         "🔔 Majburiy obuna", "👑 Adminlar", "🤖 Bot holati", "🏠 Asosiy menyu"
-    ]:
-        return  # Bu tugmalar yuqoridagi handlerlarda
+    ]
+    if is_admin(user.id) and text in admin_buttons:
+        return
 
-    # Video havola
+    # Video havola tekshiruvi
     if is_video_link(text):
         wait_msg = await message.answer("⏳ Video yuklanmoqda, iltimos kuting...")
         try:
             result = await downloader.download(text)
             if result and result.get('file'):
-                video_title = result.get('title', 'video')
+                video_title = result.get('title') or 'video'
                 safe_title = video_title[:30].replace(" ", "_")
 
-                music_btn = InlineKeyboardButton(
-                    text="🎵 Musiqani yuklab olish",
-                    callback_data=f"video_music_{safe_title}"
-                )
-                kb = InlineKeyboardMarkup(inline_keyboard=[[music_btn]])
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🎵 Musiqani yuklab olish",
+                        callback_data="video_music_" + safe_title
+                    )
+                ]])
 
-                caption = f"📥 @NyuklaBot orqali yuklab olindi"
-
+                caption = "📥 @NyuklaBot orqali yuklab olindi"
+                video_file = types.FSInputFile(result['file'])
                 await bot.send_video(
                     message.chat.id,
-                    video=types.FSInputFile(result['file']),
+                    video=video_file,
                     caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML"
+                    reply_markup=kb
                 )
                 if os.path.exists(result['file']):
                     os.remove(result['file'])
@@ -604,7 +651,7 @@ async def handle_text(message: Message):
                     "• Fayl juda katta (50MB+)"
                 )
         except Exception as e:
-            logger.error(f"Download error: {e}")
+            logger.error("Download error: %s", e)
             await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.")
         finally:
             await wait_msg.delete()
@@ -619,11 +666,12 @@ async def handle_text(message: Message):
             buttons = []
             for i, track in enumerate(results[:5], 1):
                 duration = track.get('duration', '')
-                dur_str = f" [{duration}]" if duration else ""
-                resp += f"{i}. <b>{track['title']}</b> — {track['artist']}{dur_str}\n"
+                dur_str = " [" + duration + "]" if duration else ""
+                resp += str(i) + ". <b>" + track['title'] + "</b> — " + track['artist'] + dur_str + "\n"
+                btn_text = str(i) + ". " + track['title'][:35]
                 buttons.append([InlineKeyboardButton(
-                    text=f"{i}. {track['title'][:35]}",
-                    callback_data=f"dl_music_{track['id']}"
+                    text=btn_text,
+                    callback_data="dl_music_" + track['id']
                 )])
 
             resp += "\n📥 @NyuklaBot orqali istagan musiqangizni tez va oson toping!"
@@ -635,20 +683,21 @@ async def handle_text(message: Message):
                 "Musiqa nomini to'liqroq yoki inglizcha yozing."
             )
     except Exception as e:
-        logger.error(f"Search error: {e}")
+        logger.error("Search error: %s", e)
         await message.answer("❌ Qidirishda xatolik yuz berdi.")
     finally:
         await wait_msg.delete()
 
 
-# ─── Webhook / Polling ────────────────────────────────────────
+# ─── Health Check ─────────────────────────────────────────────
 async def health_check(request):
-    return web.Response(text="✅ NyuklaBot ishlayapti!", status=200)
+    return web.Response(text="OK", status=200)
 
 
+# ─── Startup / Shutdown ───────────────────────────────────────
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
-    logger.info(f"Webhook set: {WEBHOOK_URL + WEBHOOK_PATH}")
+    logger.info("Webhook set: %s%s", WEBHOOK_URL, WEBHOOK_PATH)
 
 
 async def on_shutdown(app):
@@ -656,16 +705,17 @@ async def on_shutdown(app):
     await bot.session.close()
 
 
+# ─── Entry Point ──────────────────────────────────────────────
 def main():
     if WEBHOOK_URL:
         app = web.Application()
         app.on_startup.append(on_startup)
         app.on_shutdown.append(on_shutdown)
+        app.router.add_get('/health', health_check)
+        app.router.add_get('/', health_check)
 
         SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
-        app.router.add_get('/health', health_check)
-        app.router.add_get('/', health_check)
 
         web.run_app(app, host="0.0.0.0", port=PORT)
     else:
