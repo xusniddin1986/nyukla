@@ -1,124 +1,123 @@
-import json
+import sqlite3
 import os
-from datetime import datetime
-from config import OWNER_ID
+from datetime import datetime, timedelta
+from typing import List, Tuple, Optional
 
-DB_FILE = "data/db.json"
 
-def _load():
-    os.makedirs("data", exist_ok=True)
-    if not os.path.exists(DB_FILE):
-        _save(_default())
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+class Database:
+    def __init__(self, db_path: str = "nyuklabot.db"):
+        self.db_path = db_path
+        self._init_db()
 
-def _save(data):
-    os.makedirs("data", exist_ok=True)
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-def _default():
-    return {
-        "users": {},
-        "admins": [OWNER_ID] if OWNER_ID else [],
-        "channels": [],
-        "bot_on": True,
-        "stats": {"downloads": 0, "searches": 0}
-    }
+    def _init_db(self):
+        with self._get_conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id     INTEGER PRIMARY KEY,
+                    username    TEXT,
+                    full_name   TEXT,
+                    joined_at   TEXT DEFAULT (datetime('now'))
+                );
 
-class DB:
-    def add_user(self, uid, username=None, full_name=None):
-        d = _load()
-        key = str(uid)
-        if key not in d["users"]:
-            d["users"][key] = {"id": uid, "username": username, "full_name": full_name,
-                                "joined": datetime.now().isoformat(), "downloads": 0, "searches": 0}
-        else:
-            if username: d["users"][key]["username"] = username
-            if full_name: d["users"][key]["full_name"] = full_name
-        _save(d)
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id     INTEGER PRIMARY KEY
+                );
 
-    def get_users(self):
-        return list(_load()["users"].values())
+                CREATE TABLE IF NOT EXISTS required_channels (
+                    channel_id  TEXT PRIMARY KEY
+                );
+            """)
+            conn.commit()
 
-    def get_user_count(self):
-        return len(_load()["users"])
+    # ─── Users ────────────────────────────────────────────────
+    def add_user(self, user_id: int, username: Optional[str], full_name: Optional[str]):
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)",
+                (user_id, username, full_name)
+            )
+            conn.commit()
 
-    def get_admins(self):
-        d = _load()
-        admins = d.get("admins", [])
-        if OWNER_ID and OWNER_ID not in admins:
-            admins.append(OWNER_ID)
-        return admins
+    def get_all_users(self, limit: int = None) -> List[Tuple]:
+        with self._get_conn() as conn:
+            if limit:
+                rows = conn.execute(
+                    "SELECT user_id, username, full_name FROM users ORDER BY joined_at DESC LIMIT ?",
+                    (limit,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT user_id, username, full_name FROM users"
+                ).fetchall()
+        return [(r['user_id'], r['username'], r['full_name']) for r in rows]
 
-    def add_admin(self, uid):
-        d = _load()
-        if uid not in d["admins"]:
-            d["admins"].append(uid)
-            _save(d)
-            return True
-        return False
+    def get_stats(self) -> dict:
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        month_ago = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
-    def remove_admin(self, uid):
-        d = _load()
-        if uid in d["admins"] and uid != OWNER_ID:
-            d["admins"].remove(uid)
-            _save(d)
-            return True
-        return False
+        with self._get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            today_count = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE date(joined_at) = ?", (today,)
+            ).fetchone()[0]
+            week_count = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE joined_at >= ?", (week_ago,)
+            ).fetchone()[0]
+            month_count = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE joined_at >= ?", (month_ago,)
+            ).fetchone()[0]
 
-    def get_channels(self):
-        return _load().get("channels", [])
-
-    def add_channel(self, ch):
-        d = _load()
-        if ch not in d["channels"]:
-            d["channels"].append(ch)
-            _save(d)
-            return True
-        return False
-
-    def remove_channel(self, ch):
-        d = _load()
-        if ch in d["channels"]:
-            d["channels"].remove(ch)
-            _save(d)
-            return True
-        return False
-
-    def is_active(self):
-        return _load().get("bot_on", True)
-
-    def set_active(self, val):
-        d = _load()
-        d["bot_on"] = val
-        _save(d)
-
-    def inc_download(self, uid):
-        d = _load()
-        key = str(uid)
-        if key in d["users"]:
-            d["users"][key]["downloads"] = d["users"][key].get("downloads", 0) + 1
-        d["stats"]["downloads"] = d["stats"].get("downloads", 0) + 1
-        _save(d)
-
-    def inc_search(self, uid):
-        d = _load()
-        key = str(uid)
-        if key in d["users"]:
-            d["users"][key]["searches"] = d["users"][key].get("searches", 0) + 1
-        d["stats"]["searches"] = d["stats"].get("searches", 0) + 1
-        _save(d)
-
-    def get_stats(self):
-        d = _load()
         return {
-            "users": len(d["users"]),
-            "admins": len(d.get("admins", [])),
-            "downloads": d["stats"].get("downloads", 0),
-            "searches": d["stats"].get("searches", 0),
-            "bot_on": d.get("bot_on", True),
-            "channels": len(d.get("channels", []))
+            "total": total,
+            "today": today_count,
+            "week": week_count,
+            "month": month_count
         }
 
-db = DB()
+    # ─── Admins ───────────────────────────────────────────────
+    def get_admins(self) -> List[int]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT user_id FROM admins").fetchall()
+        return [r['user_id'] for r in rows]
+
+    def add_admin(self, user_id: int):
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO admins (user_id) VALUES (?)",
+                (user_id,)
+            )
+            conn.commit()
+
+    def remove_admin(self, user_id: int):
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            conn.commit()
+
+    # ─── Channels ─────────────────────────────────────────────
+    def get_required_channels(self) -> List[str]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT channel_id FROM required_channels").fetchall()
+        return [r['channel_id'] for r in rows]
+
+    def add_required_channel(self, channel_id: str):
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO required_channels (channel_id) VALUES (?)",
+                (channel_id,)
+            )
+            conn.commit()
+
+    def remove_required_channel(self, channel_id: str):
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM required_channels WHERE channel_id = ?",
+                (channel_id,)
+            )
+            conn.commit()
